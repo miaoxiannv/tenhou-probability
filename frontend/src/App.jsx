@@ -3,6 +3,7 @@ import {
   createSession,
   exportCsvFile,
   exportPdfFile,
+  exportPngFile,
   getSessionHistory,
   getSessionState,
   previewPlotSpec,
@@ -14,6 +15,18 @@ import { ChatPane } from './components/ChatPane';
 import { PlotPane } from './components/PlotPane';
 
 const SETTINGS_KEY = 'viz-workspace-settings-v1';
+const QUICK_PROMPTS = [
+  '画一个散点图，x=group，y=value',
+  '画折线图，按 day 展示 il6 趋势',
+  '画柱状图，对比不同组的平均值',
+  '画箱线图，比较 Group 的分布差异',
+  '画热图，查看相关性',
+  '筛选 group == A 后画图',
+  '按 value 降序后画柱状图',
+  '先做分组统计再画图',
+  '把标题改成“实验结果总览”',
+  '导出当前图并保留表格视图',
+];
 
 function getInitialSettings() {
   if (typeof window === 'undefined') {
@@ -35,18 +48,11 @@ function getInitialSettings() {
   }
 }
 
-function buildPdfFilename() {
+function buildTimestamp(prefix, ext) {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, '0');
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `chart_${stamp}.pdf`;
-}
-
-function buildCsvFilename() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `table_${stamp}.csv`;
+  return `${prefix}_${stamp}.${ext}`;
 }
 
 function buildTableStatus(tableState) {
@@ -61,9 +67,29 @@ function buildTableStatus(tableState) {
   const columnCount = Number.isFinite(tableState.column_count) ? tableState.column_count : 0;
 
   if (sourceRowCount !== rowCount) {
-    return `当前数据：${tableState.filename}（视图 ${rowCount}/${sourceRowCount} 行，${columnCount} 列）`;
+    return `${tableState.filename}（视图 ${rowCount}/${sourceRowCount} 行，${columnCount} 列）`;
   }
-  return `当前数据：${tableState.filename}，${rowCount} 行，${columnCount} 列`;
+  return `${tableState.filename}（${rowCount} 行，${columnCount} 列）`;
+}
+
+function triggerBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function SettingsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <path
+        d="M19.43 12.98a7.98 7.98 0 0 0 .06-.98 7.98 7.98 0 0 0-.06-.98l2.12-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.56 7.56 0 0 0-1.7-.98l-.38-2.65a.5.5 0 0 0-.49-.42h-4a.5.5 0 0 0-.49.42L8.73 5.07a7.56 7.56 0 0 0-1.7.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.12 1.65a7.98 7.98 0 0 0-.06.98c0 .33.02.66.06.98l-2.12 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.09.73 1.7.98l.38 2.65a.5.5 0 0 0 .49.42h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.18-.58 1.7-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.12-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
 }
 
 export function App() {
@@ -78,14 +104,16 @@ export function App() {
   const [snapshotDraft, setSnapshotDraft] = useState('baseline');
   const [selectedSnapshot, setSelectedSnapshot] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [showDataPanel, setShowDataPanel] = useState(false);
+  const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [theme, setTheme] = useState(() => getInitialSettings().theme);
   const [fontSize, setFontSize] = useState(() => getInitialSettings().fontSize);
 
   const [messages, setMessages] = useState([
-    { role: 'assistant', text: '可直接聊天，也可在聊天输入“加载文件 /home/zhang/xxx.csv”或“把第一行第二列的值改成2”。' },
+    { role: 'assistant', text: '上传数据后，直接描述你想要的图。我会先给出可用首图，再按你的指令微调。' },
   ]);
   const [prompt, setPrompt] = useState('');
-  const [chatMode, setChatMode] = useState('auto');
+  const [lastUserPrompt, setLastUserPrompt] = useState('');
 
   const [plotStatus, setPlotStatus] = useState('等待指令');
   const [plotSpec, setPlotSpec] = useState(null);
@@ -100,6 +128,7 @@ export function App() {
   const [editingSpec, setEditingSpec] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
+  const [exportingPng, setExportingPng] = useState(false);
 
   const sendDisabled = useMemo(() => !prompt.trim(), [prompt]);
   const actionBusy = uploading || sending || tableActioning;
@@ -108,6 +137,9 @@ export function App() {
   const canRedo = Boolean(hasTableData && Number(sessionState?.redo_count || 0) > 0 && !actionBusy);
   const canDownloadPdf = Boolean(sessionId && plotSpec && !exportingPdf);
   const canDownloadCsv = Boolean(sessionId && hasTableData && !exportingCsv);
+  const canDownloadPng = Boolean(sessionId && plotSpec && !exportingPng);
+  const canRetry = Boolean(lastUserPrompt && !sending);
+  const datasetSummary = hasTableData ? uploadStatus : '未加载数据';
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -197,10 +229,10 @@ export function App() {
       const data = await uploadDataset(sid, targetFile);
       applyTableState(data);
       await refreshSessionMetadata(sid);
-      appendMessage('assistant', '数据已加载。现在可以直接发绘图或表格控制指令。');
+      appendMessage('assistant', '数据已加载。请直接描述目标图，我会先生成首图。');
     } catch (error) {
       setUploadStatus(`上传失败：${error.message}`);
-      appendMessage('error', `上传失败：${error.message}`);
+      appendMessage('error', `上传失败：${error.message}。建议：检查文件格式是否为 CSV/XLSX，并确认列名不为空。`);
     } finally {
       setUploading(false);
     }
@@ -214,8 +246,8 @@ export function App() {
     }
   };
 
-  const handleSend = async () => {
-    const text = prompt.trim();
+  const handleSend = async (overridePrompt = null) => {
+    const text = (overridePrompt ?? prompt).trim();
     if (!text || sending) {
       return;
     }
@@ -224,11 +256,14 @@ export function App() {
       setSending(true);
       setPlotStatus('处理中...');
       appendMessage('user', text);
-      setPrompt('');
+      setLastUserPrompt(text);
+      if (!overridePrompt) {
+        setPrompt('');
+      }
       setWarnings([]);
 
       const sid = await ensureSession();
-      const data = await requestChat(sid, text, chatMode);
+      const data = await requestChat(sid, text, 'auto');
       const nextSessionId = data.session_id || sid;
       if (nextSessionId !== sid) {
         setSessionId(nextSessionId);
@@ -239,10 +274,25 @@ export function App() {
       appendMessage('assistant', data.summary || '已回复。');
     } catch (error) {
       setPlotStatus(`生成失败：${error.message}`);
-      appendMessage('error', `生成失败：${error.message}`);
+      appendMessage('error', `生成失败：${error.message}。建议：补充图类型、x/y 字段，或先输入“预览 20 行”确认列名。`);
     } finally {
       setSending(false);
     }
+  };
+
+  const handleRetry = async () => {
+    if (!lastUserPrompt) {
+      appendMessage('error', '没有可重试的上一次指令。');
+      return;
+    }
+    await handleSend(lastUserPrompt);
+  };
+
+  const handleUseSuggestion = async (text) => {
+    if (!text) {
+      return;
+    }
+    await handleSend(text);
   };
 
   const handleApplySpec = async (nextSpec) => {
@@ -259,7 +309,7 @@ export function App() {
       await refreshSessionMetadata(sessionId);
     } catch (error) {
       setPlotStatus(`参数应用失败：${error.message}`);
-      appendMessage('error', `参数应用失败：${error.message}`);
+      appendMessage('error', `参数应用失败：${error.message}。建议：检查字段是否存在，或先重置为基础图类型。`);
     } finally {
       setEditingSpec(false);
     }
@@ -267,46 +317,77 @@ export function App() {
 
   const handleDownloadPdf = async () => {
     if (!sessionId || !plotSpec) {
-      appendMessage('error', '暂无可导出内容');
+      appendMessage('error', '暂无可导出的图。建议先生成图后再导出。');
       return;
     }
 
     try {
       setExportingPdf(true);
-      const blob = await exportPdfFile(sessionId, plotSpec, buildPdfFilename());
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = buildPdfFilename();
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const filename = buildTimestamp('chart', 'pdf');
+      const blob = await exportPdfFile(sessionId, plotSpec, filename);
+      triggerBlobDownload(blob, filename);
     } catch (error) {
-      appendMessage('error', `PDF 导出失败：${error.message}`);
+      appendMessage('error', `PDF 导出失败：${error.message}。建议：先切换为基础图类型后重试。`);
     } finally {
       setExportingPdf(false);
     }
   };
 
+  const handleDownloadPng = async () => {
+    if (!sessionId || !plotSpec) {
+      appendMessage('error', '暂无可导出的图。建议先生成图后再导出。');
+      return;
+    }
+
+    try {
+      setExportingPng(true);
+      const filename = buildTimestamp('chart', 'png');
+      const blob = await exportPngFile(sessionId, plotSpec, filename);
+      triggerBlobDownload(blob, filename);
+    } catch (error) {
+      appendMessage('error', `PNG 导出失败：${error.message}。建议：先切换为基础图类型后重试。`);
+    } finally {
+      setExportingPng(false);
+    }
+  };
+
   const handleDownloadCsv = async () => {
     if (!sessionId || !hasTableData) {
-      appendMessage('error', '暂无可导出表格');
+      appendMessage('error', '暂无可导出表格。建议先上传或生成表格视图。');
       return;
     }
 
     try {
       setExportingCsv(true);
-      const blob = await exportCsvFile(sessionId, buildCsvFilename(), 'active');
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = buildCsvFilename();
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const filename = buildTimestamp('table', 'csv');
+      const blob = await exportCsvFile(sessionId, filename, 'active');
+      triggerBlobDownload(blob, filename);
     } catch (error) {
-      appendMessage('error', `CSV 导出失败：${error.message}`);
+      appendMessage('error', `CSV 导出失败：${error.message}。建议：确认当前会话仍存在并重试。`);
     } finally {
       setExportingCsv(false);
     }
+  };
+
+  const handleExportSpec = () => {
+    if (!plotSpec) {
+      appendMessage('error', '暂无可导出的 spec。建议先生成图后导出。');
+      return;
+    }
+    const blob = new Blob([JSON.stringify(plotSpec, null, 2)], { type: 'application/json' });
+    triggerBlobDownload(blob, buildTimestamp('spec', 'json'));
+  };
+
+  const handleImportSpec = async (specData) => {
+    if (!specData || typeof specData !== 'object') {
+      appendMessage('error', 'spec 导入失败：JSON 内容无效。');
+      return;
+    }
+    if (!sessionId) {
+      appendMessage('error', 'spec 导入失败：请先上传数据并创建会话。');
+      return;
+    }
+    await handleApplySpec(specData);
   };
 
   const runTableCommand = async (command) => {
@@ -325,7 +406,7 @@ export function App() {
       await refreshSessionMetadata(nextSessionId);
       appendMessage('assistant', data.summary || '已执行表格操作。');
     } catch (error) {
-      appendMessage('error', `表格操作失败：${error.message}`);
+      appendMessage('error', `表格操作失败：${error.message}。建议：先确认列名和行号。`);
     } finally {
       setTableActioning(false);
     }
@@ -353,56 +434,83 @@ export function App() {
   };
 
   return (
-    <div className="app-root">
-      <header className="app-header">
-        <div>
-          <h1>SheetPilot Studio</h1>
-          <p>Spec-first：后端返回结构化 PlotSpec，前端直接渲染图并可继续编辑参数。</p>
+    <div className="app-root app-autoplot">
+      <header className="app-header app-header-compact">
+        <div className="header-copy">
+          <h1>AutoPlot Studio</h1>
+          <p>上传数据，描述需求，立即出图。</p>
         </div>
 
-        <button
-          type="button"
-          className="settings-trigger"
-          aria-label="设置"
-          onClick={() => setShowSettings(true)}
-        >
-          ⚙
-        </button>
+        <div className="top-actions">
+          <label className="file-picker top-upload-btn">
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleSelectFile} />
+            <span>{uploading ? '上传中...' : '上传数据'}</span>
+          </label>
+          <button
+            type="button"
+            className="ghost-btn"
+            onClick={() => setShowDataPanel((prev) => !prev)}
+            aria-label="切换数据面板"
+          >
+            {showDataPanel ? '隐藏数据面板' : '数据面板'}
+          </button>
+          <button
+            type="button"
+            className="ghost-btn"
+            onClick={() => setShowDebugInfo((prev) => !prev)}
+            aria-label="切换调试信息"
+          >
+            调试
+          </button>
+          <button
+            type="button"
+            className="settings-trigger"
+            aria-label="设置"
+            onClick={() => setShowSettings(true)}
+          >
+            <SettingsIcon />
+          </button>
+        </div>
       </header>
 
-      <main className="workspace">
-        <DataPane
-          file={file}
-          onFileChange={handleSelectFile}
-          uploadStatus={uploadStatus}
-          tableColumns={tableColumns}
-          previewRows={previewRows}
-          loading={uploading}
-          actionBusy={actionBusy}
-          canUndo={canUndo}
-          canRedo={canRedo}
-          onUndo={handleUndo}
-          onRedo={handleRedo}
-          snapshotDraft={snapshotDraft}
-          onSnapshotDraftChange={setSnapshotDraft}
-          selectedSnapshot={selectedSnapshot}
-          onSelectedSnapshotChange={setSelectedSnapshot}
-          onSaveSnapshot={handleSaveSnapshot}
-          onLoadSnapshot={handleLoadSnapshot}
-          snapshotOptions={snapshotOptions}
-          historyItems={historyItems}
-        />
+      <div className="context-strip">
+        <span className="context-chip">数据集：{datasetSummary}</span>
+        <span className="context-chip">模式：智能</span>
+      </div>
 
-        <ChatPane
-          messages={messages}
-          prompt={prompt}
-          onPromptChange={setPrompt}
-          mode={chatMode}
-          onModeChange={setChatMode}
-          onSend={handleSend}
-          sendDisabled={sendDisabled}
-          sending={sending}
-        />
+      {showDebugInfo ? (
+        <section className="debug-strip">
+          <div>session: {sessionId || '未创建'}</div>
+          <div>history: {Number(sessionState?.history_count || 0)}</div>
+          <div>updated: {sessionState?.updated_at || 'n/a'}</div>
+        </section>
+      ) : null}
+
+      <main className={`workspace ${showDataPanel ? 'workspace-with-data' : 'workspace-focus'}`}>
+        {showDataPanel ? (
+          <DataPane
+            file={file}
+            onFileChange={handleSelectFile}
+            uploadStatus={uploadStatus}
+            tableColumns={tableColumns}
+            previewRows={previewRows}
+            loading={uploading}
+            actionBusy={actionBusy}
+            canUndo={canUndo}
+            canRedo={canRedo}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            snapshotDraft={snapshotDraft}
+            onSnapshotDraftChange={setSnapshotDraft}
+            selectedSnapshot={selectedSnapshot}
+            onSelectedSnapshotChange={setSelectedSnapshot}
+            onSaveSnapshot={handleSaveSnapshot}
+            onLoadSnapshot={handleLoadSnapshot}
+            snapshotOptions={snapshotOptions}
+            historyItems={historyItems}
+            hasTableData={hasTableData}
+          />
+        ) : null}
 
         <PlotPane
           plotStatus={plotStatus}
@@ -413,12 +521,33 @@ export function App() {
           thinking={thinking}
           canDownloadPdf={canDownloadPdf}
           canDownloadCsv={canDownloadCsv}
+          canDownloadPng={canDownloadPng}
           onDownloadPdf={handleDownloadPdf}
           onDownloadCsv={handleDownloadCsv}
+          onDownloadPng={handleDownloadPng}
           onApplySpec={handleApplySpec}
+          onRetry={handleRetry}
+          canRetry={canRetry}
+          onExportSpec={handleExportSpec}
+          onImportSpec={handleImportSpec}
           columnOptions={tableColumns}
           theme={theme}
           editing={editingSpec}
+        />
+
+        <ChatPane
+          messages={messages}
+          prompt={prompt}
+          onPromptChange={setPrompt}
+          mode="auto"
+          onModeChange={() => {}}
+          onSend={handleSend}
+          sendDisabled={sendDisabled}
+          sending={sending}
+          placeholder="输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性"
+          suggestions={QUICK_PROMPTS}
+          onUseSuggestion={handleUseSuggestion}
+          showModeSelector={false}
         />
       </main>
 

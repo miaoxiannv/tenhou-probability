@@ -164,6 +164,12 @@ class ExportPdfRequest(BaseModel):
     filename: str | None = Field(default=None, max_length=120)
 
 
+class ExportPngRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=100)
+    plot_spec: dict[str, Any]
+    filename: str | None = Field(default=None, max_length=120)
+
+
 class ExportCsvRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=100)
     filename: str | None = Field(default=None, max_length=120)
@@ -2056,6 +2062,19 @@ def _safe_pdf_name(raw_name: str | None) -> str:
     return base
 
 
+def _safe_png_name(raw_name: str | None) -> str:
+    base = (raw_name or "chart").strip()
+    if not base:
+        base = "chart"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+    base = base[:80].strip("._-")
+    if not base:
+        base = "chart"
+    if not base.lower().endswith(".png"):
+        base = f"{base}.png"
+    return base
+
+
 def _safe_csv_name(raw_name: str | None) -> str:
     base = (raw_name or "table").strip()
     if not base:
@@ -2508,6 +2527,47 @@ def export_csv(request: ExportCsvRequest):
         details={"rows": int(len(source_df)), "filename": download_name},
     )
     return Response(content=csv_bytes, media_type="text/csv", headers=headers)
+
+
+@app.post("/api/export/png")
+def export_png(request: ExportPngRequest):
+    session = SESSIONS.get(request.session_id)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found")
+
+    active = _active_df(session)
+    columns = [str(c) for c in active.columns]
+    trace: list[str] = []
+    spec = _validate_spec_or_400(request.plot_spec, columns, trace)
+    render_spec = spec
+    used_fallback = False
+
+    try:
+        png_b64, _, _ = render_plot(active, render_spec)
+        png_bytes = base64.b64decode(png_b64.encode("ascii"))
+    except Exception as exc:
+        trace.append(f"PNG 主渲染失败，准备降级：{exc}")
+        try:
+            render_spec = _fallback_renderable_spec(spec, columns, trace)
+            png_b64, _, _ = render_plot(active, render_spec)
+            png_bytes = base64.b64decode(png_b64.encode("ascii"))
+            used_fallback = True
+        except Exception as degrade_exc:
+            raise HTTPException(status_code=400, detail=f"PNG export failed: {degrade_exc}") from degrade_exc
+
+    download_name = _safe_png_name(request.filename)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{download_name}"',
+        "X-Export-Used-Fallback": "true" if used_fallback else "false",
+        "X-Export-Chart-Type": render_spec.chart_type,
+    }
+    _append_session_history(
+        session,
+        action="export_png",
+        summary=f"导出 PNG（{render_spec.chart_type}）",
+        details={"used_fallback": used_fallback, "filename": download_name},
+    )
+    return Response(content=png_bytes, media_type="image/png", headers=headers)
 
 
 @app.post("/api/export/pdf")

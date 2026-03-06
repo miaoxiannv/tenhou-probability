@@ -10,12 +10,14 @@ from pydantic import ValidationError
 from backend.main import (
     ChatRequest,
     ExportCsvRequest,
+    ExportPngRequest,
     ExportPdfRequest,
     SESSIONS,
     SpecRequest,
     chat_and_plot,
     compute_stats,
     export_csv,
+    export_png,
     export_pdf,
     get_session_history,
     get_session_state,
@@ -507,6 +509,24 @@ class ChatAgentTests(unittest.TestCase):
         )
         self.assertEqual(response.media_type, "application/pdf")
         self.assertIn('filename="heatmap_chart.pdf"', response.headers.get("Content-Disposition", ""))
+
+    def test_export_png_endpoint_returns_png_bytes(self):
+        csv_path = self._make_csv()
+        session_id = "session8824_png"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = export_png(
+            ExportPngRequest(
+                session_id=session_id,
+                plot_spec={"chart_type": "scatter", "x": "value", "y": "value", "hue": "group"},
+                filename="scatter_chart",
+            )
+        )
+        self.assertEqual(response.media_type, "image/png")
+        self.assertIn('filename="scatter_chart.png"', response.headers.get("Content-Disposition", ""))
 
     def test_session_state_and_history_endpoints(self):
         csv_path = self._make_csv()

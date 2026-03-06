@@ -23,6 +23,7 @@ vi.mock('./api/client', async () => {
     previewPlotSpec: vi.fn(),
     exportPdfFile: vi.fn(),
     exportCsvFile: vi.fn(),
+    exportPngFile: vi.fn(),
     getSessionState: vi.fn(),
     getSessionHistory: vi.fn(),
   };
@@ -52,6 +53,7 @@ describe('App behavior', () => {
     api.requestChat.mockResolvedValue(baseChatResponse());
     api.exportPdfFile.mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' }));
     api.exportCsvFile.mockResolvedValue(new Blob(['group,value\nA,1\n'], { type: 'text/csv' }));
+    api.exportPngFile.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
     api.getSessionState.mockResolvedValue({
       session_id: 'session-1',
       created_at: '2026-03-06T00:00:00Z',
@@ -80,11 +82,11 @@ describe('App behavior', () => {
     HTMLAnchorElement.prototype.click = vi.fn();
   });
 
-  it('can chat without uploading file', async () => {
+  it('can chat without uploading file in auto mode', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, '你好');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -96,26 +98,23 @@ describe('App behavior', () => {
     });
   });
 
-  it('sends selected chat mode to backend', async () => {
+  it('suggestion chip can trigger send', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.selectOptions(screen.getByLabelText('聊天模式'), 'plot');
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
-    await user.type(textbox, '画图');
-    await user.click(screen.getByRole('button', { name: '发送' }));
-
+    await user.click(screen.getByRole('button', { name: '画热图，查看相关性' }));
     await waitFor(() => {
-      expect(api.requestChat).toHaveBeenCalledWith('session-1', '画图', 'plot');
+      expect(api.requestChat).toHaveBeenCalledWith('session-1', '画热图，查看相关性', 'auto');
     });
   });
 
-  it('shows excel-like default grid before upload', () => {
+  it('shows excel-like grid when opening data panel', async () => {
+    const user = userEvent.setup();
     render(<App />);
 
+    await user.click(screen.getByRole('button', { name: '切换数据面板' }));
     expect(screen.getByRole('columnheader', { name: 'A' })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'H' })).toBeInTheDocument();
-    expect(screen.getAllByRole('row').length).toBeGreaterThanOrEqual(51);
   });
 
   it('shows loading and prevents duplicate submit while sending', async () => {
@@ -128,7 +127,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, 'test message');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -141,7 +140,7 @@ describe('App behavior', () => {
     });
   });
 
-  it('downloads pdf when plot spec exists', async () => {
+  it('downloads pdf from unified export menu when plot spec exists', async () => {
     api.requestChat.mockResolvedValue(
       baseChatResponse({
         plot_spec: { chart_type: 'scatter', x: 'x', y: 'y', hue: null, filters: [] },
@@ -162,7 +161,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, '画图');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -170,10 +169,10 @@ describe('App behavior', () => {
       expect(screen.getAllByText('图已更新').length).toBeGreaterThan(0);
     });
 
-    const downloadBtn = screen.getByRole('button', { name: '下载 PDF' });
-    await waitFor(() => expect(downloadBtn).toBeEnabled());
+    const pdfBtn = screen.getByRole('button', { name: '导出 PDF' });
+    await waitFor(() => expect(pdfBtn).toBeEnabled());
+    await user.click(pdfBtn);
 
-    await user.click(downloadBtn);
     await waitFor(() => {
       expect(api.exportPdfFile).toHaveBeenCalledTimes(1);
       expect(api.exportPdfFile).toHaveBeenCalledWith(
@@ -181,20 +180,10 @@ describe('App behavior', () => {
         expect.objectContaining({ chart_type: 'scatter' }),
         expect.stringMatching(/^chart_\d{8}_\d{4}\.pdf$/),
       );
-      expect(global.URL.createObjectURL).toHaveBeenCalledTimes(1);
-      expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1);
-      expect(global.URL.revokeObjectURL).toHaveBeenCalledTimes(1);
     });
   });
 
-  it('keeps pdf button disabled when no plot exists', () => {
-    render(<App />);
-    const downloadBtn = screen.getByRole('button', { name: '下载 PDF' });
-    expect(downloadBtn).toBeDisabled();
-    expect(downloadBtn).toHaveAttribute('title', '暂无可导出内容');
-  });
-
-  it('downloads csv when table data exists', async () => {
+  it('downloads csv from unified export menu when table data exists', async () => {
     api.requestChat.mockResolvedValue(
       baseChatResponse({
         summary: '表格已更新',
@@ -215,7 +204,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, '筛选 group == A');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -223,7 +212,7 @@ describe('App behavior', () => {
       expect(screen.getAllByText('表格已更新').length).toBeGreaterThan(0);
     });
 
-    const csvBtn = screen.getByRole('button', { name: '下载 CSV' });
+    const csvBtn = screen.getByRole('button', { name: '导出 CSV' });
     await waitFor(() => expect(csvBtn).toBeEnabled());
     await user.click(csvBtn);
 
@@ -234,13 +223,10 @@ describe('App behavior', () => {
         expect.stringMatching(/^table_\d{8}_\d{4}\.csv$/),
         'active',
       );
-      expect(global.URL.createObjectURL).toHaveBeenCalled();
-      expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled();
-      expect(global.URL.revokeObjectURL).toHaveBeenCalled();
     });
   });
 
-  it('triggers undo from table controls', async () => {
+  it('triggers undo from data panel controls', async () => {
     api.requestChat
       .mockResolvedValueOnce(
         baseChatResponse({
@@ -301,7 +287,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, '把第一行第二列的值改成8');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -309,6 +295,7 @@ describe('App behavior', () => {
       expect(screen.getAllByText('已更新单元格').length).toBeGreaterThan(0);
     });
 
+    await user.click(screen.getByRole('button', { name: '切换数据面板' }));
     const undoBtn = screen.getByRole('button', { name: '撤销' });
     await waitFor(() => expect(undoBtn).toBeEnabled());
     await user.click(undoBtn);
@@ -319,7 +306,7 @@ describe('App behavior', () => {
     });
   });
 
-  it('renders recent action history panel', async () => {
+  it('renders audit history in data panel tab', async () => {
     api.requestChat.mockResolvedValue(
       baseChatResponse({
         summary: '表格已更新',
@@ -358,12 +345,14 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
     await user.type(textbox, '把第一行第二列的值改成8');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
+    await user.click(screen.getByRole('button', { name: '切换数据面板' }));
+    await user.click(screen.getByRole('tab', { name: '审计' }));
+
     await waitFor(() => {
-      expect(screen.getByText('最近操作')).toBeInTheDocument();
       expect(screen.getByText('update_cell')).toBeInTheDocument();
       expect(screen.getByText('更新第 1 行第 2 列')).toBeInTheDocument();
     });

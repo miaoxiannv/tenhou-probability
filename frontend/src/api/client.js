@@ -126,6 +126,28 @@ export async function exportPdfFile(sessionId, plotSpec, filename) {
   return res.blob();
 }
 
+export async function exportPngFile(sessionId, plotSpec, filename) {
+  const res = await safeFetch('/api/export/png', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      plot_spec: plotSpec,
+      filename
+    })
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = data?.detail || data?.message || 'PNG 导出失败';
+    throw new Error(detail);
+  }
+
+  return res.blob();
+}
+
 export async function exportCsvFile(sessionId, filename, source = 'active') {
   const res = await safeFetch('/api/export/csv', {
     method: 'POST',
