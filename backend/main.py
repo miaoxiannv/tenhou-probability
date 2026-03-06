@@ -29,6 +29,10 @@ MAX_ROWS = 1_000_000
 PREVIEW_ROWS = 50
 MAX_TRACE_STEPS = 20
 MAX_CELL_RANGE_UPDATES = 10_000
+DEFAULT_SHEET_ROWS = 50
+DEFAULT_SHEET_COLS = 8
+MAX_SCRATCH_ROWS = 20_000
+MAX_SCRATCH_COLS = 512
 TABLE_OPS = {"==", "!=", ">", ">=", "<", "<=", "in", "not in"}
 LEGACY_STATIC_FILES = {
     "index.html",
@@ -388,6 +392,49 @@ def _parse_excel_cell_ref(raw: str) -> tuple[int, int] | None:
     return row, col
 
 
+def _excel_col_label(index: int) -> str:
+    if index < 1:
+        raise ValueError("column index must be >= 1")
+    chars: list[str] = []
+    value = index
+    while value > 0:
+        value, rem = divmod(value - 1, 26)
+        chars.append(chr(ord("A") + rem))
+    return "".join(reversed(chars))
+
+
+def _scratch_sheet_shape_from_command(command: dict[str, Any]) -> tuple[int, int, str | None]:
+    action = command.get("action")
+    requested_rows = DEFAULT_SHEET_ROWS
+    requested_cols = DEFAULT_SHEET_COLS
+
+    if action == "update_cell":
+        requested_rows = max(requested_rows, int(command.get("row", 1)))
+        if command.get("column_index") is not None:
+            requested_cols = max(requested_cols, int(command.get("column_index", 1)))
+    elif action == "update_cell_range":
+        start = int(command.get("row_start", 1))
+        end = int(command.get("row_end", 1))
+        requested_rows = max(requested_rows, start, end)
+        if command.get("column_index") is not None:
+            requested_cols = max(requested_cols, int(command.get("column_index", 1)))
+
+    if requested_rows < 1 or requested_cols < 1:
+        return 0, 0, "单元格修改失败：行列索引必须从 1 开始。"
+    if requested_rows > MAX_SCRATCH_ROWS:
+        return 0, 0, f"单元格修改失败：空白表最多支持 {MAX_SCRATCH_ROWS} 行。"
+    if requested_cols > MAX_SCRATCH_COLS:
+        return 0, 0, f"单元格修改失败：空白表最多支持 {MAX_SCRATCH_COLS} 列。"
+    return requested_rows, requested_cols, None
+
+
+def _create_scratch_session(rows: int, cols: int) -> SessionData:
+    columns = [_excel_col_label(i + 1) for i in range(cols)]
+    data = {name: [None] * rows for name in columns}
+    df = pd.DataFrame(data)
+    return SessionData(df=df, filename="untitled_sheet", view_df=df.copy(), last_plot_spec=None)
+
+
 def _table_command_from_message(message: str) -> dict[str, Any] | None:
     text = message.strip()
     if not text:
@@ -676,6 +723,14 @@ def _execute_table_command(
             loaded,
             preview_rows,
         )
+
+    if not session and action in {"update_cell", "update_cell_range"}:
+        rows, cols, err = _scratch_sheet_shape_from_command(command)
+        if err:
+            return (err, None, preview_rows)
+        session = _create_scratch_session(rows, cols)
+        SESSIONS[session_id] = session
+        trace.append(f"未检测到已加载数据，已自动创建空白工作表：rows={rows}, cols={cols}")
 
     if not session:
         return (

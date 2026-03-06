@@ -161,6 +161,11 @@ npm run frontend:dev
 | `画图 type=line x=day y=il6 stats=on title=IL6 trend` | `plot type=line x=day y=il6 stats=on title=IL6 trend` |
 | `把颜色改成 Blues，标题改为 IL6 trend` | `set palette to Blues and title to IL6 trend` |
 
+说明 / Notes:
+
+- 若当前会话尚未加载文件，发送改单元格指令时会自动创建一个空白表（默认 50 行、8 列 A-H）。  
+  If no dataset is loaded, cell-edit commands auto-create a blank sheet (default 50 rows, 8 columns A-H).
+
 数据路径安全限制 / Local file safety boundaries:
 
 - 聊天加载本地文件仅允许以下根目录：项目目录、`/home/zhang`、`/tmp`。  

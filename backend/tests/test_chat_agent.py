@@ -202,6 +202,17 @@ class ChatAgentTests(unittest.TestCase):
         self.assertEqual(response["plot_spec"]["title"], "Line Demo")
         self.assertTrue(bool(response["plot_spec"]["stats_overlay"]["enabled"]))
 
+    def test_chat_can_update_sheet_without_upload_by_creating_scratch_table(self):
+        session_id = "session6234"
+        response = chat_and_plot(ChatRequest(session_id=session_id, message="把第一行第二列的值改成2"))
+
+        self.assertIsNotNone(response["table_state"])
+        assert response["table_state"] is not None
+        self.assertEqual(response["table_state"]["filename"], "untitled_sheet")
+        self.assertGreaterEqual(response["table_state"]["row_count"], 50)
+        self.assertGreaterEqual(response["table_state"]["column_count"], 8)
+        self.assertEqual(response["table_state"]["preview_rows"][0]["B"], 2)
+
     def test_chat_without_dataset_still_replies(self):
         response = chat_and_plot(ChatRequest(session_id="session9012", message="你好"))
         self.assertEqual(response["session_id"], "session9012")
