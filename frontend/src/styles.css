@@ -122,6 +122,23 @@ body {
   font-size: 1rem;
 }
 
+.mode-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.mode-picker select {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 0 8px;
+}
+
 .panel-subtitle {
   color: var(--muted);
   font-size: 0.86rem;

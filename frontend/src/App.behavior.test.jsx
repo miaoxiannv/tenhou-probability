@@ -62,10 +62,24 @@ describe('App behavior', () => {
     await user.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => {
-      expect(api.requestChat).toHaveBeenCalledWith('session-1', '你好');
+      expect(api.requestChat).toHaveBeenCalledWith('session-1', '你好', 'auto');
     });
     await waitFor(() => {
       expect(screen.getAllByText('已回复。').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('sends selected chat mode to backend', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText('聊天模式'), 'plot');
+    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    await user.type(textbox, '画图');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(api.requestChat).toHaveBeenCalledWith('session-1', '画图', 'plot');
     });
   });
 

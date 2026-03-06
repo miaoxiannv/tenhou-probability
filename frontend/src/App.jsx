@@ -70,6 +70,7 @@ export function App() {
     { role: 'assistant', text: '可直接聊天，也可在聊天输入“加载文件 /home/zhang/xxx.csv”或“把第一行第二列的值改成2”。' },
   ]);
   const [prompt, setPrompt] = useState('');
+  const [chatMode, setChatMode] = useState('auto');
 
   const [plotStatus, setPlotStatus] = useState('等待指令');
   const [plotSpec, setPlotSpec] = useState(null);
@@ -179,7 +180,7 @@ export function App() {
       setWarnings([]);
 
       const sid = await ensureSession();
-      const data = await requestChat(sid, text);
+      const data = await requestChat(sid, text, chatMode);
       if (data.session_id && data.session_id !== sid) {
         setSessionId(data.session_id);
       }
@@ -267,6 +268,8 @@ export function App() {
           messages={messages}
           prompt={prompt}
           onPromptChange={setPrompt}
+          mode={chatMode}
+          onModeChange={setChatMode}
           onSend={handleSend}
           sendDisabled={sendDisabled}
           sending={sending}

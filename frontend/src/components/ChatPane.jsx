@@ -1,5 +1,12 @@
 import React from 'react';
 
+const CHAT_MODE_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'chat', label: 'Chat' },
+  { value: 'plot', label: 'Plot' },
+  { value: 'table', label: 'Table' },
+];
+
 function Message({ item }) {
   const roleClass = item.role === 'user' ? 'msg user' : item.role === 'error' ? 'msg error' : 'msg assistant';
 
@@ -15,6 +22,8 @@ export function ChatPane({
   messages,
   prompt,
   onPromptChange,
+  mode,
+  onModeChange,
   onSend,
   sendDisabled,
   sending
@@ -29,8 +38,24 @@ export function ChatPane({
   return (
     <section className="panel chat-pane panel-enter panel-enter-delay-1">
       <div className="panel-head">
-        <h2>对话</h2>
-        <span className="panel-subtitle">自然语言指令</span>
+        <div>
+          <h2>对话</h2>
+          <span className="panel-subtitle">自然语言指令</span>
+        </div>
+        <label className="mode-picker">
+          <span>模式</span>
+          <select
+            aria-label="聊天模式"
+            value={mode}
+            onChange={(event) => onModeChange(event.target.value)}
+          >
+            {CHAT_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="chat-shell">

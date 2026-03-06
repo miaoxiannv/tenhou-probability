@@ -38,10 +38,13 @@ export async function uploadDataset(sessionId, file) {
   return parseJson(res);
 }
 
-export async function requestChat(sessionId, message) {
+export async function requestChat(sessionId, message, mode = 'auto') {
   const payload = { message };
   if (sessionId) {
     payload.session_id = sessionId;
+  }
+  if (mode) {
+    payload.mode = mode;
   }
 
   const res = await safeFetch('/api/chat', {

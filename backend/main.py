@@ -7,7 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -130,6 +130,7 @@ SESSIONS: dict[str, SessionData] = {}
 class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, min_length=8, max_length=100)
     message: str = Field(min_length=1, max_length=2000)
+    mode: Literal["auto", "chat", "plot", "table"] = Field(default="auto")
 
 
 class SpecRequest(BaseModel):
@@ -316,6 +317,16 @@ def _parse_filter_values(raw: str) -> list[Any]:
     return [] if scalar == "" else [scalar]
 
 
+def _parse_numeric_scalar(raw: str) -> float | None:
+    value = _parse_scalar_value(raw)
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def _coerce_cell_value_for_series(value: Any, series: pd.Series) -> Any:
     if value is None:
         return None
@@ -450,6 +461,42 @@ def _table_command_from_message(message: str) -> dict[str, Any] | None:
 
     if re.match(r"^.+\.(?:csv|xlsx|xls)$", text, flags=re.IGNORECASE):
         return {"action": "load_file", "path": text}
+
+    clip_group_range_cn = re.match(
+        r"^把\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s*中(?:的)?\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s*组(?:的)?所有\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s*的范围(?:更改|改为|限制|裁剪)为\s*([+-]?\d+(?:\.\d+)?)\s*(?:-|~|～|到)\s*([+-]?\d+(?:\.\d+)?)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if clip_group_range_cn:
+        lower = _parse_numeric_scalar(clip_group_range_cn.group(4))
+        upper = _parse_numeric_scalar(clip_group_range_cn.group(5))
+        if lower is not None and upper is not None:
+            return {
+                "action": "clip_group_range",
+                "group_column": clip_group_range_cn.group(1).strip(),
+                "group_value": _parse_scalar_value(clip_group_range_cn.group(2)),
+                "target_column": clip_group_range_cn.group(3).strip(),
+                "lower": lower,
+                "upper": upper,
+            }
+
+    clip_group_range_en = re.match(
+        r"^clip\s+([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s+where\s+([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s*==\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s+to\s+([+-]?\d+(?:\.\d+)?)\s*(?:-|~|～|to)\s*([+-]?\d+(?:\.\d+)?)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if clip_group_range_en:
+        lower = _parse_numeric_scalar(clip_group_range_en.group(4))
+        upper = _parse_numeric_scalar(clip_group_range_en.group(5))
+        if lower is not None and upper is not None:
+            return {
+                "action": "clip_group_range",
+                "group_column": clip_group_range_en.group(2).strip(),
+                "group_value": _parse_scalar_value(clip_group_range_en.group(3)),
+                "target_column": clip_group_range_en.group(1).strip(),
+                "lower": lower,
+                "upper": upper,
+            }
 
     set_cell_range_cn = re.match(
         r"^(?:把|将)?\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*(?:到|-|~|～)\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*行\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,6})\s*列(?:的值)?\s*(?:改成|改为|设为|设置为|=)\s*(.+)$",
@@ -702,6 +749,26 @@ def _resolve_update_column(
     return resolved, columns.index(resolved) + 1, None
 
 
+def _resolve_column_with_error(
+    requested: str,
+    *,
+    columns: list[str],
+    field_name: str,
+    trace: list[str],
+    err_prefix: str,
+) -> tuple[str | None, str | None]:
+    target = requested.strip()
+    if not target:
+        return None, f"{err_prefix}：缺少列名。"
+    try:
+        resolved = resolve_column_name(target, columns, field_name=field_name, notes=trace)
+    except ValueError:
+        return None, f"{err_prefix}：未找到列 {target}。"
+    if not resolved:
+        return None, f"{err_prefix}：缺少有效列名。"
+    return resolved, None
+
+
 def _execute_table_command(
     *,
     command: dict[str, Any],
@@ -761,6 +828,69 @@ def _execute_table_command(
 
     active = _active_df(session)
     columns = [str(c) for c in active.columns]
+
+    if action == "clip_group_range":
+        group_column, group_col_err = _resolve_column_with_error(
+            str(command.get("group_column", "")),
+            columns=columns,
+            field_name="group_column",
+            trace=trace,
+            err_prefix="范围修改失败",
+        )
+        if group_col_err:
+            return (group_col_err, session, preview_rows)
+        target_column, target_col_err = _resolve_column_with_error(
+            str(command.get("target_column", "")),
+            columns=columns,
+            field_name="target_column",
+            trace=trace,
+            err_prefix="范围修改失败",
+        )
+        if target_col_err:
+            return (target_col_err, session, preview_rows)
+        if not group_column or not target_column:
+            return ("范围修改失败：列信息无效。", session, preview_rows)
+
+        lower = float(command.get("lower", 0))
+        upper = float(command.get("upper", 0))
+        if lower > upper:
+            lower, upper = upper, lower
+
+        source_df = session.df
+        group_value = command.get("group_value")
+        mask = source_df[group_column] == group_value
+        matched_count = int(mask.sum())
+        if matched_count <= 0:
+            return (f"范围修改完成：{group_column} == {group_value} 未匹配到任何行。", session, preview_rows)
+
+        numeric_series = pd.to_numeric(source_df[target_column], errors="coerce")
+        numeric_mask = mask & numeric_series.notna()
+        updatable_count = int(numeric_mask.sum())
+        if updatable_count <= 0:
+            return (
+                f"范围修改失败：匹配到 {matched_count} 行，但列 {target_column} 没有可处理的数值。",
+                session,
+                preview_rows,
+            )
+
+        clipped = numeric_series.clip(lower=lower, upper=upper)
+        update_indices = source_df.index[numeric_mask]
+        source_df.loc[update_indices, target_column] = clipped.loc[update_indices]
+        if session.view_df is not None:
+            view_indices = session.view_df.index.intersection(update_indices)
+            if len(view_indices) > 0:
+                session.view_df.loc[view_indices, target_column] = source_df.loc[view_indices, target_column]
+
+        skipped_non_numeric = matched_count - updatable_count
+        trace.append(
+            f"范围裁剪完成：{group_column}=={group_value}, col={target_column}, range=[{lower}, {upper}], updated={updatable_count}, skipped_non_numeric={skipped_non_numeric}"
+        )
+        summary = (
+            f"已将 {group_column} 为 {group_value} 的 {updatable_count} 行 {target_column} 限制到 [{lower:g}, {upper:g}]。"
+        )
+        if skipped_non_numeric > 0:
+            summary += f" 另有 {skipped_non_numeric} 行因非数值未修改。"
+        return (summary, session, preview_rows)
 
     if action == "update_cell_range":
         row_start = int(command.get("row_start", 0))
@@ -1635,12 +1765,65 @@ def _general_chat_reply(message: str, *, has_dataset: bool) -> tuple[str, bool]:
 
 @app.post("/api/chat")
 def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
-    trace: list[str] = ["收到用户请求，开始解析"]
+    mode = request.mode
+    trace: list[str] = [f"收到用户请求，开始解析，mode={mode}"]
     session_id = request.session_id or uuid.uuid4().hex
     session = SESSIONS.get(session_id)
 
+    if mode == "chat":
+        trace.append("chat 模式：仅返回对话，不执行表格或绘图动作")
+        summary, used_fallback = _general_chat_reply(request.message, has_dataset=bool(session))
+        table_payload: dict[str, Any] | None = None
+        plot_spec_payload: dict[str, Any] | None = None
+        plot_payload: dict[str, Any] | None = None
+        stats: dict[str, Any] | None = None
+        warnings: list[str] = []
+        if session:
+            table_payload = _table_state(session)
+            plot_spec_payload, plot_payload, stats, warnings = _current_plot_context(session, trace)
+        return {
+            "session_id": session_id,
+            "summary": summary,
+            "used_fallback": used_fallback,
+            "plot_spec": plot_spec_payload,
+            "stats": stats,
+            "warnings": warnings,
+            "thinking": _limit_trace(trace),
+            "table_state": table_payload,
+            "plot_payload": plot_payload,
+            "legacy_image_base64": "",
+            "raw_model_text": "",
+            "mode_used": "chat",
+            "intent": "chat",
+        }
+
     table_command = _table_command_from_message(request.message)
-    if table_command:
+    if mode == "table" and not table_command:
+        trace.append("table 模式下未识别表格指令")
+        table_payload: dict[str, Any] | None = _table_state(session) if session else None
+        plot_spec_payload: dict[str, Any] | None = None
+        plot_payload: dict[str, Any] | None = None
+        stats: dict[str, Any] | None = None
+        warnings: list[str] = []
+        if session:
+            plot_spec_payload, plot_payload, stats, warnings = _current_plot_context(session, trace)
+        return {
+            "session_id": session_id,
+            "summary": "当前为 table 模式，仅执行表格指令。可输入：筛选 group == A、按 value 降序、把第一行第二列的值改成2。",
+            "used_fallback": False,
+            "plot_spec": plot_spec_payload,
+            "stats": stats,
+            "warnings": warnings,
+            "thinking": _limit_trace(trace),
+            "table_state": table_payload,
+            "plot_payload": plot_payload,
+            "legacy_image_base64": "",
+            "raw_model_text": "",
+            "mode_used": "table",
+            "intent": "table",
+        }
+
+    if table_command and mode in {"auto", "table"}:
         trace.append(f"识别为表格控制指令：{table_command.get('action')}")
         summary, updated_session, preview_rows = _execute_table_command(
             command=table_command,
@@ -1667,10 +1850,29 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "plot_payload": plot_payload,
             "legacy_image_base64": "",
             "raw_model_text": "",
+            "mode_used": mode,
+            "intent": "table",
         }
 
     session = SESSIONS.get(session_id)
     if not session:
+        if mode == "plot":
+            trace.append("plot 模式下未检测到可用数据")
+            return {
+                "session_id": session_id,
+                "summary": "当前为 plot 模式，但还没有可用数据。请先加载文件，例如：加载文件 /home/zhang/xxx.csv。",
+                "used_fallback": False,
+                "plot_spec": None,
+                "stats": None,
+                "warnings": [],
+                "thinking": _limit_trace(trace),
+                "table_state": None,
+                "plot_payload": None,
+                "legacy_image_base64": "",
+                "raw_model_text": "",
+                "mode_used": "plot",
+                "intent": "plot",
+            }
         trace.append("未检测到已上传表格，进入通用对话模式")
         summary, used_fallback = _general_chat_reply(request.message, has_dataset=False)
         return {
@@ -1685,6 +1887,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "plot_payload": None,
             "legacy_image_base64": "",
             "raw_model_text": "",
+            "mode_used": "auto",
+            "intent": "chat",
         }
 
     df = _active_df(session)
@@ -1694,7 +1898,7 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
     )
 
     has_existing_spec = session.last_plot_spec is not None
-    if not _has_plot_intent(request.message, has_existing_spec=has_existing_spec):
+    if mode == "auto" and not _has_plot_intent(request.message, has_existing_spec=has_existing_spec):
         trace.append("识别为通用对话，不触发图表规划")
         summary, used_fallback = _general_chat_reply(request.message, has_dataset=True)
         current_spec, current_plot_payload, current_stats, current_warnings = _current_plot_context(session, trace)
@@ -1710,6 +1914,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "plot_payload": current_plot_payload,
             "legacy_image_base64": "",
             "raw_model_text": "",
+            "mode_used": "auto",
+            "intent": "chat",
         }
 
     sample_rows = (
@@ -1809,7 +2015,7 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
     else:
         response_summary = f"已按请求生成 {spec.chart_type} 图。"
 
-    return _build_chart_response(
+    response = _build_chart_response(
         session_id=session_id,
         session=session,
         spec=spec,
@@ -1819,6 +2025,9 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
         model_raw_text=model_raw_text,
         include_legacy_render=cfg.model.enable_legacy_backend_render,
     )
+    response["mode_used"] = mode
+    response["intent"] = "plot"
+    return response
 
 
 @app.post("/api/plot/spec")

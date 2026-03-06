@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from backend.main import (
     ChatRequest,
@@ -50,6 +51,19 @@ class ChatAgentTests(unittest.TestCase):
             {
                 "group": ["A", "A", "B", "B"],
                 "value": [1.0, 4.0, 3.0, 2.0],
+            }
+        )
+        df.to_csv(path, index=False)
+        return path
+
+    def _make_group_expression_csv(self) -> Path:
+        fd, raw_path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        path = Path(raw_path)
+        df = pd.DataFrame(
+            {
+                "Group": ["Control", "Control", "Treatment", "Control"],
+                "Expression": [3.2, 5.8, 9.9, 8.4],
             }
         )
         df.to_csv(path, index=False)
@@ -213,12 +227,104 @@ class ChatAgentTests(unittest.TestCase):
         self.assertGreaterEqual(response["table_state"]["column_count"], 8)
         self.assertEqual(response["table_state"]["preview_rows"][0]["B"], 2)
 
+    def test_chat_can_clip_expression_range_by_group(self):
+        csv_path = self._make_group_expression_csv()
+        session_id = "session6235"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        updated = chat_and_plot(
+            ChatRequest(session_id=session_id, message="把Group中的Control组的所有Expression的范围更改为5-7")
+        )
+        self.assertIsNotNone(updated["table_state"])
+        assert updated["table_state"] is not None
+        rows = updated["table_state"]["preview_rows"]
+        self.assertEqual(float(rows[0]["Expression"]), 5.0)
+        self.assertEqual(float(rows[1]["Expression"]), 5.8)
+        self.assertEqual(float(rows[2]["Expression"]), 9.9)
+        self.assertEqual(float(rows[3]["Expression"]), 7.0)
+
+    def test_chat_table_mode_executes_table_command(self):
+        csv_path = self._make_csv()
+        session_id = "session6236"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        filtered = chat_and_plot(
+            ChatRequest(session_id=session_id, message="筛选 group == A", mode="table")
+        )
+        self.assertEqual(filtered["mode_used"], "table")
+        self.assertIsNotNone(filtered["table_state"])
+        assert filtered["table_state"] is not None
+        self.assertEqual(filtered["table_state"]["row_count"], 2)
+
+    def test_chat_table_mode_rejects_non_table_message(self):
+        csv_path = self._make_csv()
+        session_id = "session6237"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(ChatRequest(session_id=session_id, message="你好", mode="table"))
+        self.assertEqual(response["mode_used"], "table")
+        self.assertIn("仅执行表格", response["summary"])
+        self.assertIsNotNone(response["table_state"])
+        assert response["table_state"] is not None
+        self.assertEqual(response["table_state"]["row_count"], 4)
+
+    def test_chat_mode_does_not_mutate_table_or_plot(self):
+        csv_path = self._make_csv()
+        session_id = "session6238"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(
+            ChatRequest(session_id=session_id, message="把第一行第二列的值改成2", mode="chat")
+        )
+        self.assertEqual(response["mode_used"], "chat")
+        self.assertIsNotNone(response["table_state"])
+        assert response["table_state"] is not None
+        self.assertEqual(float(response["table_state"]["preview_rows"][0]["value"]), 1.0)
+        self.assertIsNone(response["plot_spec"])
+
+    def test_chat_plot_mode_without_dataset_returns_guidance(self):
+        response = chat_and_plot(ChatRequest(session_id="session6239", message="画图", mode="plot"))
+        self.assertEqual(response["mode_used"], "plot")
+        self.assertIn("先加载文件", response["summary"])
+        self.assertIsNone(response["table_state"])
+        self.assertIsNone(response["plot_spec"])
+
+    def test_chat_plot_mode_generates_plot(self):
+        csv_path = self._make_csv()
+        session_id = "session6240"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(ChatRequest(session_id=session_id, message="画一个散点图", mode="plot"))
+        self.assertEqual(response["mode_used"], "plot")
+        self.assertIsNotNone(response["plot_spec"])
+        assert response["plot_spec"] is not None
+        self.assertEqual(response["plot_spec"]["chart_type"], "scatter")
+
     def test_chat_without_dataset_still_replies(self):
         response = chat_and_plot(ChatRequest(session_id="session9012", message="你好"))
         self.assertEqual(response["session_id"], "session9012")
         self.assertIn("summary", response)
         self.assertIsNone(response["plot_spec"])
         self.assertIsNone(response["table_state"])
+
+    def test_chat_mode_validation_rejects_unknown_mode(self):
+        with self.assertRaises(ValidationError):
+            ChatRequest(session_id="session9013", message="hello", mode="invalid")
 
     def test_preview_spec_and_stats_endpoint(self):
         csv_path = self._make_csv()
