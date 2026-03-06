@@ -1,5 +1,7 @@
 # SheetPilot Studio
 
+[English](./README.md) | [简体中文](./README_CN.md)
+
 A three-pane natural-language data visualization workspace.
 
 - Left: Excel-like table surface (upload, preview, table ops)
