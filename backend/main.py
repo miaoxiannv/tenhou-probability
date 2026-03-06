@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import io
 import re
@@ -27,7 +28,8 @@ MAX_UPLOAD_MB = 30
 MAX_ROWS = 1_000_000
 PREVIEW_ROWS = 50
 MAX_TRACE_STEPS = 20
-TABLE_OPS = {"==", "!=", ">", ">=", "<", "<="}
+MAX_CELL_RANGE_UPDATES = 10_000
+TABLE_OPS = {"==", "!=", ">", ">=", "<", "<=", "in", "not in"}
 LEGACY_STATIC_FILES = {
     "index.html",
     "styles.css",
@@ -96,6 +98,12 @@ PLOT_INTENT_KEYWORDS = (
     "置信区间",
     "双轴",
     "双y轴",
+    "stats",
+    "chart_type",
+    "x=",
+    "y=",
+    "hue=",
+    "type=",
     "raincloud",
 )
 EDIT_VERB_PATTERN = re.compile(
@@ -282,6 +290,104 @@ def _parse_scalar_value(raw: str) -> Any:
         return text
 
 
+def _parse_filter_values(raw: str) -> list[Any]:
+    text = raw.strip().strip("，。")
+    if not text:
+        return []
+
+    candidate = text
+    if candidate[0] in "[(" and candidate[-1] in "])":
+        try:
+            parsed = ast.literal_eval(candidate)
+            if isinstance(parsed, (list, tuple, set)):
+                return list(parsed)
+        except Exception:
+            candidate = candidate[1:-1].strip()
+
+    if "," in candidate or "，" in candidate:
+        parts = re.split(r"[，,]", candidate)
+        return [_parse_scalar_value(part) for part in parts if part.strip()]
+
+    scalar = _parse_scalar_value(candidate)
+    return [] if scalar == "" else [scalar]
+
+
+def _coerce_cell_value_for_series(value: Any, series: pd.Series) -> Any:
+    if value is None:
+        return None
+
+    if pd.api.types.is_numeric_dtype(series) and not isinstance(value, bool):
+        return pd.to_numeric(pd.Series([value]), errors="raise").iloc[0]
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(pd.Series([value]), errors="raise").iloc[0]
+
+    return value
+
+
+def _parse_human_index(raw: str) -> int | None:
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+
+    digit_map = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    unit_map = {"十": 10, "百": 100}
+    if not re.fullmatch(r"[零〇一二两三四五六七八九十百]+", text):
+        return None
+
+    total = 0
+    current = 0
+    for ch in text:
+        if ch in digit_map:
+            current = digit_map[ch]
+            continue
+        if ch in unit_map:
+            unit = unit_map[ch]
+            if current == 0:
+                current = 1
+            total += current * unit
+            current = 0
+            continue
+    return total + current
+
+
+def _excel_col_to_index(raw: str) -> int | None:
+    text = str(raw or "").strip()
+    if not re.fullmatch(r"[A-Za-z]{1,4}", text):
+        return None
+    index = 0
+    for ch in text.upper():
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index
+
+
+def _parse_excel_cell_ref(raw: str) -> tuple[int, int] | None:
+    text = str(raw or "").strip()
+    match = re.fullmatch(r"([A-Za-z]{1,4})(\d{1,7})", text)
+    if not match:
+        return None
+    col = _excel_col_to_index(match.group(1))
+    row = int(match.group(2))
+    if col is None or row < 1:
+        return None
+    return row, col
+
+
 def _table_command_from_message(message: str) -> dict[str, Any] | None:
     text = message.strip()
     if not text:
@@ -297,6 +403,127 @@ def _table_command_from_message(message: str) -> dict[str, Any] | None:
 
     if re.match(r"^.+\.(?:csv|xlsx|xls)$", text, flags=re.IGNORECASE):
         return {"action": "load_file", "path": text}
+
+    set_cell_range_cn = re.match(
+        r"^(?:把|将)?\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*(?:到|-|~|～)\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*行\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,6})\s*列(?:的值)?\s*(?:改成|改为|设为|设置为|=)\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_range_cn:
+        row_start = _parse_human_index(set_cell_range_cn.group(1))
+        row_end = _parse_human_index(set_cell_range_cn.group(2))
+        col = _parse_human_index(set_cell_range_cn.group(3))
+        if row_start is not None and row_end is not None and col is not None:
+            return {
+                "action": "update_cell_range",
+                "row_start": row_start,
+                "row_end": row_end,
+                "column_index": col,
+                "value": _parse_scalar_value(set_cell_range_cn.group(4)),
+            }
+
+    set_cell_range_en = re.match(
+        r"^set\s+rows?\s+(\d{1,7})\s*(?:to|-)\s*(\d{1,7})\s+(?:col|column)\s+(\d{1,4})\s+to\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_range_en:
+        return {
+            "action": "update_cell_range",
+            "row_start": int(set_cell_range_en.group(1)),
+            "row_end": int(set_cell_range_en.group(2)),
+            "column_index": int(set_cell_range_en.group(3)),
+            "value": _parse_scalar_value(set_cell_range_en.group(4)),
+        }
+
+    set_cell_by_ref_cn = re.match(
+        r"^(?:把|将)?\s*([A-Za-z]{1,4}\d{1,7})\s*(?:单元格)?(?:的值)?\s*(?:改成|改为|设为|设置为|=)\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_ref_cn:
+        parsed = _parse_excel_cell_ref(set_cell_by_ref_cn.group(1))
+        if parsed is not None:
+            row, col = parsed
+            return {
+                "action": "update_cell",
+                "row": row,
+                "column_index": col,
+                "value": _parse_scalar_value(set_cell_by_ref_cn.group(2)),
+            }
+
+    set_cell_by_ref_en = re.match(
+        r"^(?:set|update)\s+(?:cell\s+)?([A-Za-z]{1,4}\d{1,7})\s*(?:to|=)\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_ref_en:
+        parsed = _parse_excel_cell_ref(set_cell_by_ref_en.group(1))
+        if parsed is not None:
+            row, col = parsed
+            return {
+                "action": "update_cell",
+                "row": row,
+                "column_index": col,
+                "value": _parse_scalar_value(set_cell_by_ref_en.group(2)),
+            }
+
+    set_cell_by_index_cn = re.match(
+        r"^(?:把|将)?\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*行\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,6})\s*列(?:的值)?\s*(?:改成|改为|设为|设置为|=)\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_index_cn:
+        row = _parse_human_index(set_cell_by_index_cn.group(1))
+        col = _parse_human_index(set_cell_by_index_cn.group(2))
+        if row is not None and col is not None:
+            return {
+                "action": "update_cell",
+                "row": row,
+                "column_index": col,
+                "value": _parse_scalar_value(set_cell_by_index_cn.group(3)),
+            }
+
+    set_cell_by_name_cn = re.match(
+        r"^(?:把|将)?\s*第?\s*([0-9零〇一二两三四五六七八九十百]{1,8})\s*行\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})(?:列)?(?:的值)?\s*(?:改成|改为|设为|设置为|=)\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_name_cn:
+        row = _parse_human_index(set_cell_by_name_cn.group(1))
+        if row is not None:
+            return {
+                "action": "update_cell",
+                "row": row,
+                "column": set_cell_by_name_cn.group(2).strip(),
+                "value": _parse_scalar_value(set_cell_by_name_cn.group(3)),
+            }
+
+    set_cell_by_index_en = re.match(
+        r"^set\s+row\s+(\d{1,7})\s+(?:col|column)\s+(\d{1,4})\s+to\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_index_en:
+        return {
+            "action": "update_cell",
+            "row": int(set_cell_by_index_en.group(1)),
+            "column_index": int(set_cell_by_index_en.group(2)),
+            "value": _parse_scalar_value(set_cell_by_index_en.group(3)),
+        }
+
+    set_cell_by_name_en = re.match(
+        r"^set\s+row\s+(\d{1,7})\s+column\s+([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s+to\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if set_cell_by_name_en:
+        return {
+            "action": "update_cell",
+            "row": int(set_cell_by_name_en.group(1)),
+            "column": set_cell_by_name_en.group(2).strip(),
+            "value": _parse_scalar_value(set_cell_by_name_en.group(3)),
+        }
 
     preview_match = re.match(
         r"^(?:预览|查看|显示|show)(?:\s*(?:前|top)?\s*(\d{1,3})\s*(?:行|rows?)?)?$",
@@ -331,6 +558,20 @@ def _table_command_from_message(message: str) -> dict[str, Any] | None:
             "ascending": (sort_match_en.group(2) or "asc").lower() != "desc",
         }
 
+    filter_in_match = re.match(
+        r"^(?:筛选|过滤|filter)\s+([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60}?)\s+(not\s+in|in)\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if filter_in_match:
+        op = re.sub(r"\s+", " ", filter_in_match.group(2).lower()).strip()
+        return {
+            "action": "filter",
+            "column": filter_in_match.group(1).strip(),
+            "op": op,
+            "value": _parse_filter_values(filter_in_match.group(3)),
+        }
+
     filter_match = re.match(
         r"^(?:筛选|过滤|filter)\s+([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,60})\s*(==|=|!=|>=|<=|>|<)\s*(.+)$",
         text,
@@ -354,12 +595,26 @@ def _table_command_from_message(message: str) -> dict[str, Any] | None:
 
 
 def _apply_single_filter(df: pd.DataFrame, column: str, op: str, value: Any) -> pd.DataFrame:
+    op = re.sub(r"\s+", " ", str(op).strip().lower())
     if op == "=":
         op = "=="
     if op not in TABLE_OPS:
         raise ValueError(f"不支持的操作符：{op}")
 
     series = df[column]
+    if op in {"in", "not in"}:
+        targets = list(value) if isinstance(value, (list, tuple, set)) else [value]
+        if pd.api.types.is_numeric_dtype(series):
+            converted_targets = []
+            for target in targets:
+                if target is None or isinstance(target, bool):
+                    converted_targets.append(target)
+                    continue
+                converted_targets.append(pd.to_numeric(pd.Series([target]), errors="raise").iloc[0])
+            targets = converted_targets
+        mask = series.isin(targets)
+        return df[~mask] if op == "not in" else df[mask]
+
     target = value
     if pd.api.types.is_numeric_dtype(series) and target is not None and not isinstance(target, bool):
         target = pd.to_numeric(pd.Series([target]), errors="raise").iloc[0]
@@ -375,6 +630,29 @@ def _apply_single_filter(df: pd.DataFrame, column: str, op: str, value: Any) -> 
     if op == "<":
         return df[df[column] < target]
     return df[df[column] <= target]
+
+
+def _resolve_update_column(
+    command: dict[str, Any],
+    columns: list[str],
+    trace: list[str],
+) -> tuple[str | None, int | None, str | None]:
+    if command.get("column_index") is not None:
+        column_number = int(command.get("column_index", 0))
+        if column_number < 1 or column_number > len(columns):
+            return None, None, f"单元格修改失败：第 {column_number} 列超出范围（当前共有 {len(columns)} 列）。"
+        return columns[column_number - 1], column_number, None
+
+    requested = str(command.get("column", "")).strip()
+    if not requested:
+        return None, None, "单元格修改失败：未提供列名。"
+    try:
+        resolved = resolve_column_name(requested, columns, field_name="update_cell", notes=trace)
+    except ValueError:
+        return None, None, f"单元格修改失败：未找到列 {requested}。"
+    if not resolved:
+        return None, None, "单元格修改失败：未提供有效列名。"
+    return resolved, columns.index(resolved) + 1, None
 
 
 def _execute_table_command(
@@ -429,6 +707,87 @@ def _execute_table_command(
     active = _active_df(session)
     columns = [str(c) for c in active.columns]
 
+    if action == "update_cell_range":
+        row_start = int(command.get("row_start", 0))
+        row_end = int(command.get("row_end", 0))
+        if row_start < 1 or row_end < 1:
+            return ("单元格批量修改失败：行号必须从 1 开始。", session, preview_rows)
+        if row_start > row_end:
+            row_start, row_end = row_end, row_start
+        if row_end > len(active):
+            return (f"单元格批量修改失败：第 {row_end} 行超出当前视图范围（共 {len(active)} 行）。", session, preview_rows)
+        update_count = row_end - row_start + 1
+        if update_count > MAX_CELL_RANGE_UPDATES:
+            return (
+                f"单元格批量修改失败：一次最多允许更新 {MAX_CELL_RANGE_UPDATES} 个单元格，当前请求 {update_count} 个。",
+                session,
+                preview_rows,
+            )
+
+        resolved, column_number, err = _resolve_update_column(command, columns, trace)
+        if err:
+            return (err, session, preview_rows)
+        if not resolved or column_number is None:
+            return ("单元格批量修改失败：列信息无效。", session, preview_rows)
+
+        raw_value = command.get("value")
+        try:
+            new_value = _coerce_cell_value_for_series(raw_value, session.df[resolved])
+        except Exception:
+            return (f"单元格批量修改失败：列 {resolved} 需要与原类型兼容的值。", session, preview_rows)
+
+        source_indices = list(active.index[row_start - 1 : row_end])
+        if not source_indices:
+            return ("单元格批量修改失败：没有可更新的行。", session, preview_rows)
+
+        session.df.loc[source_indices, resolved] = new_value
+        if session.view_df is not None:
+            session.view_df.loc[source_indices, resolved] = new_value
+
+        trace.append(
+            f"已批量更新单元格：rows={row_start}-{row_end}, col={column_number}({resolved}), new={new_value}, count={len(source_indices)}"
+        )
+        return (
+            f"已将第 {row_start} 到 {row_end} 行第 {column_number} 列（{resolved}）更新为 {new_value}，共 {len(source_indices)} 个单元格。",
+            session,
+            preview_rows,
+        )
+
+    if action == "update_cell":
+        row_number = int(command.get("row", 0))
+        if row_number < 1:
+            return ("单元格修改失败：行号必须从 1 开始。", session, preview_rows)
+        row_index = row_number - 1
+        if row_index >= len(active):
+            return (f"单元格修改失败：第 {row_number} 行超出当前视图范围（共 {len(active)} 行）。", session, preview_rows)
+
+        resolved, column_number, err = _resolve_update_column(command, columns, trace)
+        if err:
+            return (err, session, preview_rows)
+        if not resolved or column_number is None:
+            return ("单元格修改失败：列信息无效。", session, preview_rows)
+
+        source_index = active.index[row_index]
+        raw_value = command.get("value")
+        try:
+            new_value = _coerce_cell_value_for_series(raw_value, session.df[resolved])
+        except Exception:
+            return (f"单元格修改失败：列 {resolved} 需要与原类型兼容的值。", session, preview_rows)
+
+        old_value = session.df.at[source_index, resolved] if source_index in session.df.index else None
+        session.df.at[source_index, resolved] = new_value
+        if session.view_df is not None and source_index in session.view_df.index:
+            session.view_df.at[source_index, resolved] = new_value
+
+        trace.append(
+            f"已更新单元格：row={row_number}, col={column_number}({resolved}), old={old_value}, new={new_value}"
+        )
+        return (
+            f"已将第 {row_number} 行第 {column_number} 列（{resolved}）从 {old_value} 改为 {new_value}。",
+            session,
+            preview_rows,
+        )
+
     if action == "sort":
         requested = str(command.get("column", "")).strip()
         ascending = bool(command.get("ascending", True))
@@ -439,7 +798,7 @@ def _execute_table_command(
         if not resolved:
             return ("排序指令缺少列名。", session, preview_rows)
 
-        session.view_df = active.sort_values(by=resolved, ascending=ascending, kind="stable").reset_index(drop=True)
+        session.view_df = active.sort_values(by=resolved, ascending=ascending, kind="stable")
         order_text = "升序" if ascending else "降序"
         trace.append(f"已按 {resolved} {order_text} 排序")
         return (f"已按列 {resolved} {order_text} 排序。", session, preview_rows)
@@ -460,7 +819,7 @@ def _execute_table_command(
         except Exception as exc:
             return (f"筛选失败：{exc}", session, preview_rows)
 
-        session.view_df = filtered.reset_index(drop=True)
+        session.view_df = filtered
         trace.append(f"筛选完成：{resolved} {op} {value}，剩余 {len(session.view_df)} 行")
         return (f"筛选完成：{resolved} {op} {value}，当前剩余 {len(session.view_df)} 行。", session, preview_rows)
 
@@ -698,6 +1057,14 @@ def _infer_palette_from_message(message: str) -> str | None:
 
 def _detect_chart_type(message: str) -> str | None:
     lower = message.lower()
+    explicit = re.search(
+        r"(?:chart_type|chart|type|图类型)\s*(?:=|:)\s*(scatter|line|bar|hist|box|violin|heatmap|composed)",
+        lower,
+        flags=re.IGNORECASE,
+    )
+    if explicit:
+        return explicit.group(1).lower()
+
     if "箱线" in message or "box" in lower:
         return "box"
     if "小提琴" in message or "violin" in lower:
@@ -777,6 +1144,33 @@ def _extract_bins_override(message: str) -> tuple[bool, int | None]:
     return True, int(match.group(1))
 
 
+def _extract_key_value_token(message: str, keys: list[str]) -> str | None:
+    safe_keys = "|".join(re.escape(key) for key in keys)
+    pattern = rf"(?:^|[\s,，;；])(?:{safe_keys})\s*(?:=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\(\)（）]{{1,60}})"
+    match = re.search(pattern, message, flags=re.IGNORECASE)
+    if not match:
+        return None
+    token = match.group(1).strip()
+    return token or None
+
+
+def _extract_stats_toggle(message: str) -> bool | None:
+    explicit = re.search(
+        r"(?:stats|stats_overlay|统计)\s*(?:=|:)\s*(on|off|true|false|1|0|yes|no)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if explicit:
+        value = explicit.group(1).lower()
+        return value in {"on", "true", "1", "yes"}
+
+    if re.search(r"(统计标注|显著性|p值|p 值|效应量|effect size)", message, flags=re.IGNORECASE):
+        return True
+    if re.search(r"(关闭统计|不要统计标注|取消统计标注)", message, flags=re.IGNORECASE):
+        return False
+    return None
+
+
 def _has_plot_intent(message: str, *, has_existing_spec: bool) -> bool:
     text = message.strip()
     if not text:
@@ -797,7 +1191,11 @@ def _is_explicit_plot_edit_request(message: str, *, has_existing_spec: bool) -> 
         return True
     if EDIT_VERB_PATTERN.search(message):
         return True
-    if re.search(r"(x轴|y轴|横轴|纵轴|hue|调色板|palette|颜色|标题|title|agg|聚合|bins|分箱|facet|分面|双轴|回归|统计标注)", message, flags=re.IGNORECASE):
+    if re.search(
+        r"(x轴|y轴|横轴|纵轴|hue|调色板|palette|颜色|标题|title|agg|聚合|bins|分箱|facet|分面|双轴|回归|统计标注|stats|chart_type|type|x=|y=)",
+        message,
+        flags=re.IGNORECASE,
+    ):
         return True
     return False
 
@@ -884,13 +1282,15 @@ def _apply_request_overrides(
         sync_layer_encoding("hue", None)
         trace.append("按请求取消分组（hue=None）")
     else:
-        group_hint = _extract_column_hint(
-            message,
-            [
-                r"(?:按|根据)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})\s*(?:进行)?(?:分组|分色|着色|上色|分层)",
-                r"(?:hue|分组列|颜色列|group(?:_by|by)?)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
-            ],
-        )
+        group_hint = _extract_key_value_token(message, ["hue", "group", "group_by", "groupby", "分组列", "颜色列"])
+        if not group_hint:
+            group_hint = _extract_column_hint(
+                message,
+                [
+                    r"(?:按|根据)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})\s*(?:进行)?(?:分组|分色|着色|上色|分层)",
+                    r"(?:hue|分组列|颜色列|group(?:_by|by)?)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
+                ],
+            )
         if group_hint:
             resolved = safe_resolve(group_hint, "group")
             if resolved:
@@ -898,12 +1298,14 @@ def _apply_request_overrides(
                 sync_layer_encoding("hue", resolved)
                 trace.append(f"分组列按用户指令设置为 {resolved}")
 
-    x_hint = _extract_column_hint(
-        message,
-        [
-            r"(?:x轴|横轴|x)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
-        ],
-    )
+    x_hint = _extract_key_value_token(message, ["x", "x轴", "横轴"])
+    if not x_hint:
+        x_hint = _extract_column_hint(
+            message,
+            [
+                r"(?:x轴|横轴|x)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
+            ],
+        )
     if x_hint:
         resolved = safe_resolve(x_hint, "x")
         if resolved:
@@ -911,12 +1313,14 @@ def _apply_request_overrides(
             sync_layer_encoding("x", resolved)
             trace.append(f"x 轴按用户指令设置为 {resolved}")
 
-    y_hint = _extract_column_hint(
-        message,
-        [
-            r"(?:y轴|纵轴|y)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
-        ],
-    )
+    y_hint = _extract_key_value_token(message, ["y", "y轴", "纵轴"])
+    if not y_hint:
+        y_hint = _extract_column_hint(
+            message,
+            [
+                r"(?:y轴|纵轴|y)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
+            ],
+        )
     if y_hint:
         resolved = safe_resolve(y_hint, "y")
         if resolved:
@@ -948,23 +1352,26 @@ def _apply_request_overrides(
         out["facet"] = None
         trace.append("按请求取消分面")
     else:
-        facet_hint = _extract_column_hint(
-            message,
-            [
-                r"(?:按|根据)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})\s*(?:分面|facet)",
-                r"(?:facet|分面列)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
-            ],
-        )
+        facet_hint = _extract_key_value_token(message, ["facet", "分面列"])
+        if not facet_hint:
+            facet_hint = _extract_column_hint(
+                message,
+                [
+                    r"(?:按|根据)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})\s*(?:分面|facet)",
+                    r"(?:facet|分面列)\s*(?:改为|设为|=|:)\s*([A-Za-z0-9_\u4e00-\u9fff\-\s()（）]{1,40})",
+                ],
+            )
         if facet_hint:
             facet_col = safe_resolve(facet_hint, "facet")
             if facet_col:
                 out["facet"] = {"field": facet_col, "columns": 3}
                 trace.append(f"分面列按用户指令设置为 {facet_col}")
 
-    if re.search(r"(统计标注|显著性|p值|p 值|效应量|effect size)", message, flags=re.IGNORECASE):
+    stats_toggle = _extract_stats_toggle(message)
+    if stats_toggle is True:
         out["stats_overlay"] = {"enabled": True, "method": "auto"}
         trace.append("按请求启用统计标注图层")
-    if re.search(r"(关闭统计|不要统计标注|取消统计标注)", message, flags=re.IGNORECASE):
+    elif stats_toggle is False:
         out["stats_overlay"] = {"enabled": False, "method": "auto"}
         trace.append("按请求关闭统计标注图层")
 

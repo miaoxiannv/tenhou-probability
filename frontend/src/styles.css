@@ -191,48 +191,60 @@ body {
   background-size: 100% 34px, 120px 100%;
 }
 
-.sheet-table {
+.sheet-spreadsheet {
+  min-width: 100%;
+}
+
+.sheet-spreadsheet .Spreadsheet {
+  width: 100%;
+  min-width: fit-content;
+  background: transparent;
+  color: var(--text);
+}
+
+.sheet-spreadsheet .Spreadsheet__table {
   width: 100%;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
 }
 
-.sheet-table th,
-.sheet-table td {
-  text-align: left;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-  border-right: 1px solid var(--line);
+.sheet-spreadsheet .Spreadsheet__header,
+.sheet-spreadsheet .Spreadsheet__cell {
+  min-width: 110px;
+  height: 34px;
+  max-height: 34px;
+  border: 1px solid var(--line);
   font-size: 0.84rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  min-width: 100px;
 }
 
-.sheet-table th {
+.sheet-spreadsheet .Spreadsheet__header {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   background: var(--panel);
+  color: var(--muted);
+  text-align: center;
 }
 
-.sheet-table .index-col {
+.sheet-spreadsheet .Spreadsheet__table tr > .Spreadsheet__header:first-child {
   position: sticky;
   left: 0;
-  z-index: 2;
+  z-index: 3;
   min-width: 52px;
   max-width: 52px;
   width: 52px;
-  text-align: right;
-  color: var(--muted);
-  background: var(--panel);
-  padding-right: 8px;
 }
 
-.sheet-table th.index-col {
+.sheet-spreadsheet .Spreadsheet__table tr:first-child > .Spreadsheet__header:first-child {
   z-index: 4;
+}
+
+.sheet-spreadsheet .Spreadsheet__data-viewer {
+  padding: 7px 10px;
 }
 
 .chat-shell {

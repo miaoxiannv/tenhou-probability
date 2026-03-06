@@ -10,7 +10,7 @@ describe('layout css constraints', () => {
     expect(css).toMatch(/\.workspace\s*\{[\s\S]*height:\s*calc\(100vh\s*-\s*104px\)/);
     expect(css).toMatch(/\.workspace\s*\{[\s\S]*overflow:\s*hidden/);
     expect(css).toMatch(/\.table-shell\s*\{[\s\S]*overflow:\s*auto/);
-    expect(css).toMatch(/\.sheet-table th\s*\{[\s\S]*position:\s*sticky/);
-    expect(css).toMatch(/\.sheet-table th,\s*[\s\S]*\.sheet-table td\s*\{[\s\S]*text-overflow:\s*ellipsis/);
+    expect(css).toMatch(/\.sheet-spreadsheet \.Spreadsheet__header\s*\{[\s\S]*position:\s*sticky/);
+    expect(css).toMatch(/\.sheet-spreadsheet \.Spreadsheet__header,\s*[\s\S]*\.sheet-spreadsheet \.Spreadsheet__cell\s*\{[\s\S]*text-overflow:\s*ellipsis/);
   });
 });

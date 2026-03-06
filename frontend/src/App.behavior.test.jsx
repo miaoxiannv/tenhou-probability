@@ -142,4 +142,11 @@ describe('App behavior', () => {
       );
     });
   });
+
+  it('keeps pdf button disabled when no plot exists', () => {
+    render(<App />);
+    const downloadBtn = screen.getByRole('button', { name: '下载 PDF' });
+    expect(downloadBtn).toBeDisabled();
+    expect(downloadBtn).toHaveAttribute('title', '暂无可导出内容');
+  });
 });

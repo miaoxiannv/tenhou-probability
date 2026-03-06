@@ -101,6 +101,107 @@ class ChatAgentTests(unittest.TestCase):
         self.assertIsNone(cleared["table_state"])
         self.assertNotIn(session_id, SESSIONS)
 
+    def test_chat_filter_supports_in_and_not_in(self):
+        csv_path = self._make_csv()
+        session_id = "session6118"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        in_filtered = chat_and_plot(ChatRequest(session_id=session_id, message="筛选 group in [A]"))
+        self.assertIsNotNone(in_filtered["table_state"])
+        assert in_filtered["table_state"] is not None
+        self.assertEqual(in_filtered["table_state"]["row_count"], 2)
+        self.assertTrue(all(row["group"] == "A" for row in in_filtered["table_state"]["preview_rows"]))
+
+        chat_and_plot(ChatRequest(session_id=session_id, message="重置"))
+        not_in_filtered = chat_and_plot(ChatRequest(session_id=session_id, message="filter group not in [A]"))
+        self.assertIsNotNone(not_in_filtered["table_state"])
+        assert not_in_filtered["table_state"] is not None
+        self.assertEqual(not_in_filtered["table_state"]["row_count"], 2)
+        self.assertTrue(all(row["group"] == "B" for row in not_in_filtered["table_state"]["preview_rows"]))
+
+    def test_chat_can_update_cell_by_row_and_column_index(self):
+        csv_path = self._make_csv()
+        session_id = "session6229"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        updated = chat_and_plot(ChatRequest(session_id=session_id, message="把第一行第二列的值改成2"))
+        self.assertIsNotNone(updated["table_state"])
+        assert updated["table_state"] is not None
+        self.assertEqual(updated["table_state"]["preview_rows"][0]["value"], 2.0)
+
+        reset = chat_and_plot(ChatRequest(session_id=session_id, message="重置"))
+        self.assertIsNotNone(reset["table_state"])
+        assert reset["table_state"] is not None
+        self.assertEqual(reset["table_state"]["preview_rows"][0]["value"], 2.0)
+
+    def test_chat_can_update_cell_on_filtered_view_and_persist(self):
+        csv_path = self._make_csv()
+        session_id = "session6230"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        chat_and_plot(ChatRequest(session_id=session_id, message="筛选 group == A"))
+        chat_and_plot(ChatRequest(session_id=session_id, message="把第二行第二列的值改成9"))
+        reset = chat_and_plot(ChatRequest(session_id=session_id, message="重置"))
+
+        self.assertIsNotNone(reset["table_state"])
+        assert reset["table_state"] is not None
+        self.assertEqual(reset["table_state"]["preview_rows"][1]["value"], 9.0)
+
+    def test_chat_can_update_cell_by_excel_ref(self):
+        csv_path = self._make_csv()
+        session_id = "session6231"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        updated = chat_and_plot(ChatRequest(session_id=session_id, message="把 B1 改成 8"))
+        self.assertIsNotNone(updated["table_state"])
+        assert updated["table_state"] is not None
+        self.assertEqual(updated["table_state"]["preview_rows"][0]["value"], 8.0)
+
+    def test_chat_can_batch_update_cell_range(self):
+        csv_path = self._make_csv()
+        session_id = "session6232"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        updated = chat_and_plot(ChatRequest(session_id=session_id, message="把第1到2行第2列的值改成7"))
+        self.assertIsNotNone(updated["table_state"])
+        assert updated["table_state"] is not None
+        self.assertEqual(updated["table_state"]["preview_rows"][0]["value"], 7.0)
+        self.assertEqual(updated["table_state"]["preview_rows"][1]["value"], 7.0)
+
+    def test_chat_plot_supports_type_and_axis_equals_syntax(self):
+        csv_path = self._make_csv()
+        session_id = "session6233"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(
+            ChatRequest(session_id=session_id, message="画图 type=line x=group y=value stats=on title=Line Demo")
+        )
+        self.assertIsNotNone(response["plot_spec"])
+        assert response["plot_spec"] is not None
+        self.assertEqual(response["plot_spec"]["chart_type"], "line")
+        self.assertEqual(response["plot_spec"]["x"], "group")
+        self.assertEqual(response["plot_spec"]["y"], "value")
+        self.assertEqual(response["plot_spec"]["title"], "Line Demo")
+        self.assertTrue(bool(response["plot_spec"]["stats_overlay"]["enabled"]))
+
     def test_chat_without_dataset_still_replies(self):
         response = chat_and_plot(ChatRequest(session_id="session9012", message="你好"))
         self.assertEqual(response["session_id"], "session9012")

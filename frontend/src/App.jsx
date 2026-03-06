@@ -67,7 +67,7 @@ export function App() {
   const [fontSize, setFontSize] = useState(() => getInitialSettings().fontSize);
 
   const [messages, setMessages] = useState([
-    { role: 'assistant', text: '可直接聊天，也可在聊天输入“加载文件 /home/zhang/xxx.csv”。' },
+    { role: 'assistant', text: '可直接聊天，也可在聊天输入“加载文件 /home/zhang/xxx.csv”或“把第一行第二列的值改成2”。' },
   ]);
   const [prompt, setPrompt] = useState('');
 

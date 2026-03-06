@@ -150,10 +150,15 @@ npm run frontend:dev
 | `加载文件 /home/zhang/data.csv` | `load file /home/zhang/data.csv` |
 | `预览` / `显示前 20 行` | `show` / `show top 20 rows` |
 | `筛选 group == A` | `filter group == A` |
+| `筛选 group in [A,B]` / `筛选 group not in [A]` | `filter group in [A,B]` / `filter group not in [A]` |
+| `把第一行第二列的值改成2` | `set row 1 col 2 to 2` |
+| `把 B1 改成 8` | `set cell B1 to 8` |
+| `把第1到10行第2列的值改成0` | `set rows 1-10 col 2 to 0` |
 | `按 value 降序` | `sort by value desc` |
 | `重置` | `reset` |
 | `清空数据` | `clear data` |
 | `画一个散点图，x=day，y=il6，按group分组` | `make a scatter plot, x=day, y=il6, group by group` |
+| `画图 type=line x=day y=il6 stats=on title=IL6 trend` | `plot type=line x=day y=il6 stats=on title=IL6 trend` |
 | `把颜色改成 Blues，标题改为 IL6 trend` | `set palette to Blues and title to IL6 trend` |
 
 数据路径安全限制 / Local file safety boundaries:
