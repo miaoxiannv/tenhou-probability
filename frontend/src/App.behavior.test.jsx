@@ -22,6 +22,9 @@ vi.mock('./api/client', async () => {
     uploadDataset: vi.fn(),
     previewPlotSpec: vi.fn(),
     exportPdfFile: vi.fn(),
+    exportCsvFile: vi.fn(),
+    getSessionState: vi.fn(),
+    getSessionHistory: vi.fn(),
   };
 });
 
@@ -48,6 +51,30 @@ describe('App behavior', () => {
     api.createSession.mockResolvedValue({ session_id: 'session-1' });
     api.requestChat.mockResolvedValue(baseChatResponse());
     api.exportPdfFile.mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' }));
+    api.exportCsvFile.mockResolvedValue(new Blob(['group,value\nA,1\n'], { type: 'text/csv' }));
+    api.getSessionState.mockResolvedValue({
+      session_id: 'session-1',
+      created_at: '2026-03-06T00:00:00Z',
+      updated_at: '2026-03-06T00:00:00Z',
+      history_count: 1,
+      has_plot_spec: false,
+      undo_count: 0,
+      redo_count: 0,
+      snapshots: [],
+      table_state: null,
+    });
+    api.getSessionHistory.mockResolvedValue({
+      session_id: 'session-1',
+      total: 1,
+      items: [
+        {
+          ts: '2026-03-06T00:00:00Z',
+          action: 'upload_file',
+          summary: '上传文件 demo.csv',
+          details: {},
+        },
+      ],
+    });
     global.URL.createObjectURL = vi.fn(() => 'blob:test');
     global.URL.revokeObjectURL = vi.fn();
     HTMLAnchorElement.prototype.click = vi.fn();
@@ -165,5 +192,180 @@ describe('App behavior', () => {
     const downloadBtn = screen.getByRole('button', { name: '下载 PDF' });
     expect(downloadBtn).toBeDisabled();
     expect(downloadBtn).toHaveAttribute('title', '暂无可导出内容');
+  });
+
+  it('downloads csv when table data exists', async () => {
+    api.requestChat.mockResolvedValue(
+      baseChatResponse({
+        summary: '表格已更新',
+        table_state: {
+          filename: 'demo.csv',
+          row_count: 2,
+          source_row_count: 2,
+          column_count: 2,
+          columns: [{ name: 'group' }, { name: 'value' }],
+          preview_rows: [
+            { group: 'A', value: 1 },
+            { group: 'B', value: 2 },
+          ],
+        },
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    await user.type(textbox, '筛选 group == A');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('表格已更新').length).toBeGreaterThan(0);
+    });
+
+    const csvBtn = screen.getByRole('button', { name: '下载 CSV' });
+    await waitFor(() => expect(csvBtn).toBeEnabled());
+    await user.click(csvBtn);
+
+    await waitFor(() => {
+      expect(api.exportCsvFile).toHaveBeenCalledTimes(1);
+      expect(api.exportCsvFile).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringMatching(/^table_\d{8}_\d{4}\.csv$/),
+        'active',
+      );
+      expect(global.URL.createObjectURL).toHaveBeenCalled();
+      expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled();
+      expect(global.URL.revokeObjectURL).toHaveBeenCalled();
+    });
+  });
+
+  it('triggers undo from table controls', async () => {
+    api.requestChat
+      .mockResolvedValueOnce(
+        baseChatResponse({
+          summary: '已更新单元格',
+          table_state: {
+            filename: 'demo.csv',
+            row_count: 2,
+            source_row_count: 2,
+            column_count: 2,
+            columns: [{ name: 'group' }, { name: 'value' }],
+            preview_rows: [
+              { group: 'A', value: 8 },
+              { group: 'B', value: 2 },
+            ],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseChatResponse({
+          summary: '已撤销上一步操作。',
+          table_state: {
+            filename: 'demo.csv',
+            row_count: 2,
+            source_row_count: 2,
+            column_count: 2,
+            columns: [{ name: 'group' }, { name: 'value' }],
+            preview_rows: [
+              { group: 'A', value: 1 },
+              { group: 'B', value: 2 },
+            ],
+          },
+        }),
+      );
+    api.getSessionState
+      .mockResolvedValueOnce({
+        session_id: 'session-1',
+        created_at: '2026-03-06T00:00:00Z',
+        updated_at: '2026-03-06T00:00:01Z',
+        history_count: 2,
+        has_plot_spec: false,
+        undo_count: 1,
+        redo_count: 0,
+        snapshots: [],
+        table_state: null,
+      })
+      .mockResolvedValue({
+        session_id: 'session-1',
+        created_at: '2026-03-06T00:00:00Z',
+        updated_at: '2026-03-06T00:00:02Z',
+        history_count: 3,
+        has_plot_spec: false,
+        undo_count: 0,
+        redo_count: 1,
+        snapshots: [],
+        table_state: null,
+      });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    await user.type(textbox, '把第一行第二列的值改成8');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('已更新单元格').length).toBeGreaterThan(0);
+    });
+
+    const undoBtn = screen.getByRole('button', { name: '撤销' });
+    await waitFor(() => expect(undoBtn).toBeEnabled());
+    await user.click(undoBtn);
+
+    await waitFor(() => {
+      expect(api.requestChat).toHaveBeenCalledWith('session-1', '撤销', 'table');
+      expect(screen.getAllByText('已撤销上一步操作。').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('renders recent action history panel', async () => {
+    api.requestChat.mockResolvedValue(
+      baseChatResponse({
+        summary: '表格已更新',
+        table_state: {
+          filename: 'demo.csv',
+          row_count: 2,
+          source_row_count: 2,
+          column_count: 2,
+          columns: [{ name: 'group' }, { name: 'value' }],
+          preview_rows: [
+            { group: 'A', value: 1 },
+            { group: 'B', value: 2 },
+          ],
+        },
+      }),
+    );
+    api.getSessionHistory.mockResolvedValue({
+      session_id: 'session-1',
+      total: 2,
+      items: [
+        {
+          ts: '2026-03-06T00:00:03Z',
+          action: 'update_cell',
+          summary: '更新第 1 行第 2 列',
+          details: { column: 'value' },
+        },
+        {
+          ts: '2026-03-06T00:00:01Z',
+          action: 'load_file',
+          summary: '通过聊天加载文件 demo.csv',
+          details: {},
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const textbox = screen.getByPlaceholderText('输入消息，Enter 发送，Shift+Enter 换行');
+    await user.type(textbox, '把第一行第二列的值改成8');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('最近操作')).toBeInTheDocument();
+      expect(screen.getByText('update_cell')).toBeInTheDocument();
+      expect(screen.getByText('更新第 1 行第 2 列')).toBeInTheDocument();
+    });
   });
 });

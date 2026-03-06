@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   createSession,
+  exportCsvFile,
   exportPdfFile,
+  getSessionHistory,
+  getSessionState,
   previewPlotSpec,
   requestChat,
   uploadDataset,
@@ -39,6 +42,13 @@ function buildPdfFilename() {
   return `chart_${stamp}.pdf`;
 }
 
+function buildCsvFilename() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+  return `table_${stamp}.csv`;
+}
+
 function buildTableStatus(tableState) {
   if (!tableState?.filename) {
     return '未加载文件';
@@ -62,6 +72,11 @@ export function App() {
   const [uploadStatus, setUploadStatus] = useState('未上传文件');
   const [previewRows, setPreviewRows] = useState([]);
   const [tableColumns, setTableColumns] = useState([]);
+  const [hasTableData, setHasTableData] = useState(false);
+  const [sessionState, setSessionState] = useState(null);
+  const [historyItems, setHistoryItems] = useState([]);
+  const [snapshotDraft, setSnapshotDraft] = useState('baseline');
+  const [selectedSnapshot, setSelectedSnapshot] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState(() => getInitialSettings().theme);
   const [fontSize, setFontSize] = useState(() => getInitialSettings().fontSize);
@@ -81,11 +96,18 @@ export function App() {
 
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [tableActioning, setTableActioning] = useState(false);
   const [editingSpec, setEditingSpec] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingCsv, setExportingCsv] = useState(false);
 
   const sendDisabled = useMemo(() => !prompt.trim(), [prompt]);
+  const actionBusy = uploading || sending || tableActioning;
+  const snapshotOptions = Array.isArray(sessionState?.snapshots) ? sessionState.snapshots : [];
+  const canUndo = Boolean(hasTableData && Number(sessionState?.undo_count || 0) > 0 && !actionBusy);
+  const canRedo = Boolean(hasTableData && Number(sessionState?.redo_count || 0) > 0 && !actionBusy);
   const canDownloadPdf = Boolean(sessionId && plotSpec && !exportingPdf);
+  const canDownloadCsv = Boolean(sessionId && hasTableData && !exportingCsv);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -104,6 +126,26 @@ export function App() {
     setMessages((prev) => [...prev, { role, text }]);
   };
 
+  const refreshSessionMetadata = async (sid) => {
+    if (!sid) {
+      return;
+    }
+    try {
+      const [stateData, historyData] = await Promise.all([
+        getSessionState(sid),
+        getSessionHistory(sid, 12),
+      ]);
+      setSessionState(stateData || null);
+      setHistoryItems(Array.isArray(historyData?.items) ? historyData.items.slice().reverse() : []);
+      if (Array.isArray(stateData?.snapshots) && !stateData.snapshots.includes(selectedSnapshot)) {
+        setSelectedSnapshot('');
+      }
+    } catch {
+      setSessionState(null);
+      setHistoryItems([]);
+    }
+  };
+
   const ensureSession = async () => {
     if (sessionId) {
       return sessionId;
@@ -116,17 +158,22 @@ export function App() {
 
   const applyTableState = (tableState) => {
     if (!tableState) {
+      setPreviewRows([]);
+      setTableColumns([]);
+      setHasTableData(false);
+      setUploadStatus('未加载文件');
       return;
     }
     setPreviewRows(Array.isArray(tableState.preview_rows) ? tableState.preview_rows : []);
     const cols = Array.isArray(tableState.columns) ? tableState.columns.map((item) => item.name).filter(Boolean) : [];
     setTableColumns(cols);
+    setHasTableData(true);
     setUploadStatus(buildTableStatus(tableState));
   };
 
   const applyChatPayload = (data) => {
-    if (data.table_state) {
-      applyTableState(data.table_state);
+    if ('table_state' in data) {
+      applyTableState(data.table_state || null);
     }
     setPlotSpec(data.plot_spec || null);
     setPlotPayload(data.plot_payload || null);
@@ -149,6 +196,7 @@ export function App() {
       const sid = await ensureSession();
       const data = await uploadDataset(sid, targetFile);
       applyTableState(data);
+      await refreshSessionMetadata(sid);
       appendMessage('assistant', '数据已加载。现在可以直接发绘图或表格控制指令。');
     } catch (error) {
       setUploadStatus(`上传失败：${error.message}`);
@@ -181,11 +229,13 @@ export function App() {
 
       const sid = await ensureSession();
       const data = await requestChat(sid, text, chatMode);
-      if (data.session_id && data.session_id !== sid) {
-        setSessionId(data.session_id);
+      const nextSessionId = data.session_id || sid;
+      if (nextSessionId !== sid) {
+        setSessionId(nextSessionId);
       }
 
       applyChatPayload(data);
+      await refreshSessionMetadata(nextSessionId);
       appendMessage('assistant', data.summary || '已回复。');
     } catch (error) {
       setPlotStatus(`生成失败：${error.message}`);
@@ -206,6 +256,7 @@ export function App() {
       setPlotStatus('应用参数中...');
       const data = await previewPlotSpec(sessionId, nextSpec);
       applyChatPayload(data);
+      await refreshSessionMetadata(sessionId);
     } catch (error) {
       setPlotStatus(`参数应用失败：${error.message}`);
       appendMessage('error', `参数应用失败：${error.message}`);
@@ -236,6 +287,71 @@ export function App() {
     }
   };
 
+  const handleDownloadCsv = async () => {
+    if (!sessionId || !hasTableData) {
+      appendMessage('error', '暂无可导出表格');
+      return;
+    }
+
+    try {
+      setExportingCsv(true);
+      const blob = await exportCsvFile(sessionId, buildCsvFilename(), 'active');
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = buildCsvFilename();
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      appendMessage('error', `CSV 导出失败：${error.message}`);
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
+  const runTableCommand = async (command) => {
+    if (actionBusy || !command?.trim()) {
+      return;
+    }
+    try {
+      setTableActioning(true);
+      const sid = await ensureSession();
+      const data = await requestChat(sid, command, 'table');
+      const nextSessionId = data.session_id || sid;
+      if (nextSessionId !== sid) {
+        setSessionId(nextSessionId);
+      }
+      applyChatPayload(data);
+      await refreshSessionMetadata(nextSessionId);
+      appendMessage('assistant', data.summary || '已执行表格操作。');
+    } catch (error) {
+      appendMessage('error', `表格操作失败：${error.message}`);
+    } finally {
+      setTableActioning(false);
+    }
+  };
+
+  const handleUndo = async () => runTableCommand('撤销');
+
+  const handleRedo = async () => runTableCommand('重做');
+
+  const handleSaveSnapshot = async () => {
+    const name = snapshotDraft.trim();
+    if (!name) {
+      return;
+    }
+    await runTableCommand(`保存快照 ${name}`);
+    setSelectedSnapshot(name);
+  };
+
+  const handleLoadSnapshot = async () => {
+    const name = selectedSnapshot.trim();
+    if (!name) {
+      return;
+    }
+    await runTableCommand(`加载快照 ${name}`);
+  };
+
   return (
     <div className="app-root">
       <header className="app-header">
@@ -262,6 +378,19 @@ export function App() {
           tableColumns={tableColumns}
           previewRows={previewRows}
           loading={uploading}
+          actionBusy={actionBusy}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          snapshotDraft={snapshotDraft}
+          onSnapshotDraftChange={setSnapshotDraft}
+          selectedSnapshot={selectedSnapshot}
+          onSelectedSnapshotChange={setSelectedSnapshot}
+          onSaveSnapshot={handleSaveSnapshot}
+          onLoadSnapshot={handleLoadSnapshot}
+          snapshotOptions={snapshotOptions}
+          historyItems={historyItems}
         />
 
         <ChatPane
@@ -283,7 +412,9 @@ export function App() {
           warnings={warnings}
           thinking={thinking}
           canDownloadPdf={canDownloadPdf}
+          canDownloadCsv={canDownloadCsv}
           onDownloadPdf={handleDownloadPdf}
+          onDownloadCsv={handleDownloadCsv}
           onApplySpec={handleApplySpec}
           columnOptions={tableColumns}
           theme={theme}

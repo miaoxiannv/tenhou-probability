@@ -86,6 +86,24 @@ export async function requestStats(sessionId, plotSpec) {
   return parseJson(res);
 }
 
+export async function getSessionState(sessionId) {
+  const res = await safeFetch(`/api/session/state?session_id=${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
+  });
+  return parseJson(res);
+}
+
+export async function getSessionHistory(sessionId, limit = 20) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 200));
+  const res = await safeFetch(
+    `/api/session/history?session_id=${encodeURIComponent(sessionId)}&limit=${encodeURIComponent(safeLimit)}`,
+    {
+      method: 'GET',
+    },
+  );
+  return parseJson(res);
+}
+
 export async function exportPdfFile(sessionId, plotSpec, filename) {
   const res = await safeFetch('/api/export/pdf', {
     method: 'POST',
@@ -102,6 +120,28 @@ export async function exportPdfFile(sessionId, plotSpec, filename) {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const detail = data?.detail || data?.message || 'PDF 导出失败';
+    throw new Error(detail);
+  }
+
+  return res.blob();
+}
+
+export async function exportCsvFile(sessionId, filename, source = 'active') {
+  const res = await safeFetch('/api/export/csv', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      filename,
+      source
+    })
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = data?.detail || data?.message || 'CSV 导出失败';
     throw new Error(detail);
   }
 

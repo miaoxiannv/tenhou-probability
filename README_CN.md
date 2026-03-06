@@ -23,13 +23,35 @@
   - 预览 / 筛选 / 排序 / 重置 / 清空
   - 单元格修改（`B1`、行列索引、行区间）
   - 分组范围裁剪（例如把 `Control` 组 `Expression` 限制到 `5-7`）
+  - 撤销 / 重做（`撤销`、`重做`）
+  - 快照检查点（`保存快照 baseline`、`加载快照 baseline`、`查看快照`）
 - 图类型：
   - `scatter`、`line`、`bar`、`hist`、`box`、`violin`、`heatmap`、`composed`
 - 高级组合：
   - `layers`（支持 `scatter/line/bar/hist/boxplot/violin/regression`）
   - `facet`
   - `stats_overlay`
+- 稳定绘图策略：
+  - 同一会话里重复同一绘图请求会复用缓存 spec，避免“同输入多图漂移”
 - PDF 导出（`POST /api/export/pdf`）
+- CSV 导出（`POST /api/export/csv`）
+- 会话可观测性：
+  - 状态（`GET /api/session/state`）
+  - 历史（`GET /api/session/history`）
+
+## 产品化完成度（阶段）
+
+当前成熟度评估：**约 72%**。
+
+- 已完成（接近可用产品形态）：
+  - chat/table/plot 模式路由
+  - 结构化绘图 payload 与规则回退
+  - PDF/CSV 导出链路
+  - 表格撤销重做、快照、会话历史
+- 待完成（真正生产级）：
+  - 会话持久化（当前以内存为主）
+  - 多用户鉴权与权限模型
+  - 更完整的 E2E 与压力测试
 
 ## Chat 模式（Agent Skills 分层）
 
@@ -121,6 +143,13 @@ npm run frontend:dev
 - 分组裁剪：
   - `把Group中的Control组的所有Expression的范围更改为5-7`
   - `clip Expression where Group==Control to 5-7`
+- 撤销/重做：
+  - `撤销`
+  - `redo`
+- 快照：
+  - `保存快照 baseline`
+  - `加载快照 baseline`
+  - `查看快照`
 - 绘图：
   - `画图 type=line x=day y=il6 stats=on title=IL6 trend`
   - `plot type=scatter x=group y=value`
@@ -165,8 +194,17 @@ npm run frontend:dev
 ### `POST /api/stats`
 对当前会话数据 + PlotSpec 计算统计结果。
 
+### `GET /api/session/state`
+返回会话元信息、表格状态、`undo_count`、`redo_count` 和快照列表。
+
+### `GET /api/session/history`
+返回会话操作历史（`action`、`summary`、`details`、时间戳）。
+
 ### `POST /api/export/pdf`
 导出 PDF 文件流。
+
+### `POST /api/export/csv`
+将当前视图（`active`）或原始数据（`original`）导出为 CSV 文件流。
 
 ## 环境变量
 

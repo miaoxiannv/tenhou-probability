@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import io
+import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,10 +32,15 @@ MAX_ROWS = 1_000_000
 PREVIEW_ROWS = 50
 MAX_TRACE_STEPS = 20
 MAX_CELL_RANGE_UPDATES = 10_000
+MAX_UNDO_STEPS = 80
+MAX_SNAPSHOT_COUNT = 30
+MAX_SNAPSHOT_NAME_LEN = 40
+MAX_PLOT_MESSAGE_CACHE = 80
 DEFAULT_SHEET_ROWS = 50
 DEFAULT_SHEET_COLS = 8
 MAX_SCRATCH_ROWS = 20_000
 MAX_SCRATCH_COLS = 512
+MAX_SESSION_HISTORY = 200
 TABLE_OPS = {"==", "!=", ">", ">=", "<", "<=", "in", "not in"}
 LEGACY_STATIC_FILES = {
     "index.html",
@@ -116,12 +124,24 @@ EDIT_VERB_PATTERN = re.compile(
 )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 @dataclass
 class SessionData:
     df: pd.DataFrame
     filename: str
     view_df: pd.DataFrame | None = None
     last_plot_spec: PlotSpec | None = None
+    undo_stack: list[dict[str, Any]] = field(default_factory=list)
+    redo_stack: list[dict[str, Any]] = field(default_factory=list)
+    snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    plot_message_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_plot_fingerprint: str | None = None
+    created_at: str = field(default_factory=_utc_now_iso)
+    updated_at: str = field(default_factory=_utc_now_iso)
+    history: list[dict[str, Any]] = field(default_factory=list)
 
 
 SESSIONS: dict[str, SessionData] = {}
@@ -142,6 +162,12 @@ class ExportPdfRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=100)
     plot_spec: dict[str, Any]
     filename: str | None = Field(default=None, max_length=120)
+
+
+class ExportCsvRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=100)
+    filename: str | None = Field(default=None, max_length=120)
+    source: Literal["active", "original"] = Field(default="active")
 
 
 app = FastAPI(title="SheetPilot Studio", version="0.1.0")
@@ -202,6 +228,121 @@ def _table_state(session: SessionData, *, preview_rows: int = PREVIEW_ROWS) -> d
         "columns": _columns_meta(active),
         "preview_rows": _to_preview_rows(active, rows=preview_rows),
     }
+
+
+def _append_session_history(
+    session: SessionData,
+    *,
+    action: str,
+    summary: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    normalized_details: dict[str, Any]
+    if details:
+        try:
+            normalized_details = json.loads(json.dumps(details, default=str))
+        except Exception:
+            normalized_details = {"raw": str(details)}
+    else:
+        normalized_details = {}
+
+    item = {
+        "ts": _utc_now_iso(),
+        "action": str(action).strip()[:64] or "event",
+        "summary": str(summary).strip()[:300] or "event",
+        "details": normalized_details,
+    }
+    session.history.append(item)
+    if len(session.history) > MAX_SESSION_HISTORY:
+        session.history = session.history[-MAX_SESSION_HISTORY:]
+    session.updated_at = item["ts"]
+
+
+def _capture_table_snapshot(session: SessionData) -> dict[str, Any]:
+    return {
+        "df": session.df.copy(deep=True),
+        "view_df": session.view_df.copy(deep=True) if session.view_df is not None else None,
+    }
+
+
+def _restore_table_snapshot(session: SessionData, snapshot: dict[str, Any]) -> None:
+    snapshot_df = snapshot.get("df")
+    if not isinstance(snapshot_df, pd.DataFrame):
+        raise ValueError("invalid snapshot")
+    snapshot_view = snapshot.get("view_df")
+    if snapshot_view is not None and not isinstance(snapshot_view, pd.DataFrame):
+        raise ValueError("invalid snapshot view")
+    session.df = snapshot_df.copy(deep=True)
+    session.view_df = snapshot_view.copy(deep=True) if snapshot_view is not None else None
+
+
+def _push_undo_snapshot(session: SessionData) -> None:
+    session.undo_stack.append(_capture_table_snapshot(session))
+    if len(session.undo_stack) > MAX_UNDO_STEPS:
+        session.undo_stack = session.undo_stack[-MAX_UNDO_STEPS:]
+    session.redo_stack.clear()
+
+
+def _normalize_snapshot_name(raw_name: str) -> str:
+    name = str(raw_name or "").strip()
+    if not name:
+        return ""
+    name = re.sub(r"\s+", "_", name)
+    name = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "", name)
+    name = name[:MAX_SNAPSHOT_NAME_LEN].strip("._-")
+    return name
+
+
+def _save_named_snapshot(session: SessionData, raw_name: str) -> str:
+    name = _normalize_snapshot_name(raw_name)
+    if not name:
+        raise ValueError("快照名称不能为空，且仅支持中英文、数字、下划线和连字符。")
+
+    session.snapshots[name] = {
+        "saved_at": _utc_now_iso(),
+        "table": _capture_table_snapshot(session),
+        "rows": int(len(_active_df(session))),
+        "source_rows": int(len(session.df)),
+    }
+    while len(session.snapshots) > MAX_SNAPSHOT_COUNT:
+        oldest = next(iter(session.snapshots.keys()))
+        session.snapshots.pop(oldest, None)
+    return name
+
+
+def _load_named_snapshot(session: SessionData, raw_name: str) -> str:
+    name = _normalize_snapshot_name(raw_name)
+    if not name:
+        raise ValueError("快照名称不能为空。")
+    data = session.snapshots.get(name)
+    if not data:
+        raise ValueError(f"未找到快照：{name}")
+
+    table = data.get("table")
+    if not isinstance(table, dict):
+        raise ValueError(f"快照损坏：{name}")
+    _restore_table_snapshot(session, table)
+    return name
+
+
+def _normalize_plot_message_key(message: str) -> str:
+    normalized = re.sub(r"\s+", " ", message.strip().lower())
+    return normalized[:400]
+
+
+def _trim_plot_cache(cache: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    if len(cache) <= MAX_PLOT_MESSAGE_CACHE:
+        return cache
+    keys = list(cache.keys())[-MAX_PLOT_MESSAGE_CACHE:]
+    return {key: cache[key] for key in keys}
+
+
+def _spec_fingerprint(spec_data: dict[str, Any]) -> str:
+    try:
+        canonical = json.dumps(spec_data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        canonical = str(spec_data)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _read_dataframe_from_upload(file: UploadFile, file_bytes: bytes) -> pd.DataFrame:
@@ -450,6 +591,31 @@ def _table_command_from_message(message: str) -> dict[str, Any] | None:
     text = message.strip()
     if not text:
         return None
+
+    save_snapshot_match = re.match(
+        r"^(?:保存快照|保存版本|snapshot\s+save)\s+([A-Za-z0-9_\-\u4e00-\u9fff]{1,60})$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if save_snapshot_match:
+        return {"action": "save_snapshot", "name": save_snapshot_match.group(1).strip()}
+
+    load_snapshot_match = re.match(
+        r"^(?:加载快照|恢复快照|加载版本|snapshot\s+load)\s+([A-Za-z0-9_\-\u4e00-\u9fff]{1,60})$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if load_snapshot_match:
+        return {"action": "load_snapshot", "name": load_snapshot_match.group(1).strip()}
+
+    if re.match(r"^(?:查看快照|列出快照|snapshots?|snapshot\s+list)$", text, flags=re.IGNORECASE):
+        return {"action": "list_snapshots"}
+
+    if re.match(r"^(?:撤销|undo)$", text, flags=re.IGNORECASE):
+        return {"action": "undo"}
+
+    if re.match(r"^(?:重做|redo)$", text, flags=re.IGNORECASE):
+        return {"action": "redo"}
 
     for pattern in [
         r"^(?:加载|导入|打开|读取)\s*(?:文件|数据集|dataset)?\s*[:：]?\s*(.+)$",
@@ -783,6 +949,12 @@ def _execute_table_command(
         path = _resolve_local_data_path(str(command.get("path", "")))
         df = _sanitize_dataframe(_read_dataframe_from_path(path))
         loaded = SessionData(df=df, filename=path.name, view_df=df.copy(), last_plot_spec=None)
+        _append_session_history(
+            loaded,
+            action="load_file",
+            summary=f"通过聊天加载文件 {path.name}",
+            details={"rows": int(len(df)), "columns": int(len(df.columns))},
+        )
         SESSIONS[session_id] = loaded
         trace.append(f"已通过 chat 加载文件：{path}")
         return (
@@ -796,6 +968,12 @@ def _execute_table_command(
         if err:
             return (err, None, preview_rows)
         session = _create_scratch_session(rows, cols)
+        _append_session_history(
+            session,
+            action="create_scratch",
+            summary="自动创建空白工作表",
+            details={"rows": rows, "columns": cols},
+        )
         SESSIONS[session_id] = session
         trace.append(f"未检测到已加载数据，已自动创建空白工作表：rows={rows}, cols={cols}")
 
@@ -806,9 +984,103 @@ def _execute_table_command(
             preview_rows,
         )
 
+    if action == "undo":
+        if not session.undo_stack:
+            return ("当前没有可撤销操作。", session, preview_rows)
+        current = _capture_table_snapshot(session)
+        target = session.undo_stack.pop()
+        session.redo_stack.append(current)
+        if len(session.redo_stack) > MAX_UNDO_STEPS:
+            session.redo_stack = session.redo_stack[-MAX_UNDO_STEPS:]
+        _restore_table_snapshot(session, target)
+        _append_session_history(
+            session,
+            action="undo",
+            summary="撤销上一步表格操作",
+            details={"undo_left": len(session.undo_stack), "redo_count": len(session.redo_stack)},
+        )
+        trace.append(f"撤销成功：undo_left={len(session.undo_stack)}, redo_count={len(session.redo_stack)}")
+        return ("已撤销上一步操作。", session, preview_rows)
+
+    if action == "redo":
+        if not session.redo_stack:
+            return ("当前没有可重做操作。", session, preview_rows)
+        current = _capture_table_snapshot(session)
+        target = session.redo_stack.pop()
+        session.undo_stack.append(current)
+        if len(session.undo_stack) > MAX_UNDO_STEPS:
+            session.undo_stack = session.undo_stack[-MAX_UNDO_STEPS:]
+        _restore_table_snapshot(session, target)
+        _append_session_history(
+            session,
+            action="redo",
+            summary="重做上一步表格操作",
+            details={"undo_count": len(session.undo_stack), "redo_left": len(session.redo_stack)},
+        )
+        trace.append(f"重做成功：undo_count={len(session.undo_stack)}, redo_left={len(session.redo_stack)}")
+        return ("已重做上一步操作。", session, preview_rows)
+
+    if action == "save_snapshot":
+        raw_name = str(command.get("name", ""))
+        try:
+            snapshot_name = _save_named_snapshot(session, raw_name)
+        except ValueError as exc:
+            return (f"快照保存失败：{exc}", session, preview_rows)
+        _append_session_history(
+            session,
+            action="save_snapshot",
+            summary=f"保存快照 {snapshot_name}",
+            details={"snapshot": snapshot_name, "total_snapshots": len(session.snapshots)},
+        )
+        trace.append(f"已保存快照：{snapshot_name}")
+        return (f"已保存快照：{snapshot_name}。", session, preview_rows)
+
+    if action == "load_snapshot":
+        requested_name = str(command.get("name", ""))
+        snapshot_name = _normalize_snapshot_name(requested_name)
+        if not snapshot_name:
+            return ("快照加载失败：快照名称不能为空。", session, preview_rows)
+        if snapshot_name not in session.snapshots:
+            return (f"快照加载失败：未找到快照 {snapshot_name}。", session, preview_rows)
+        _push_undo_snapshot(session)
+        try:
+            loaded_name = _load_named_snapshot(session, snapshot_name)
+        except ValueError as exc:
+            if session.undo_stack:
+                session.undo_stack.pop()
+            return (f"快照加载失败：{exc}", session, preview_rows)
+        _append_session_history(
+            session,
+            action="load_snapshot",
+            summary=f"加载快照 {loaded_name}",
+            details={"snapshot": loaded_name, "undo_count": len(session.undo_stack)},
+        )
+        trace.append(f"已加载快照：{loaded_name}")
+        return (f"已加载快照：{loaded_name}。", session, preview_rows)
+
+    if action == "list_snapshots":
+        names = list(session.snapshots.keys())
+        if not names:
+            return ("当前没有已保存快照。", session, preview_rows)
+        _append_session_history(
+            session,
+            action="list_snapshots",
+            summary="查看快照列表",
+            details={"total_snapshots": len(names)},
+        )
+        preview_names = ", ".join(names[-10:])
+        trace.append(f"快照列表：{preview_names}")
+        return (f"已保存快照（最近 {min(len(names), 10)} 个）：{preview_names}。", session, preview_rows)
+
     if action == "preview":
         preview_rows = max(1, min(int(command.get("rows", PREVIEW_ROWS)), 200))
         active = _active_df(session)
+        _append_session_history(
+            session,
+            action="preview",
+            summary=f"刷新预览前 {preview_rows} 行",
+            details={"rows": preview_rows, "current_rows": int(len(active))},
+        )
         trace.append(f"刷新预览：前 {preview_rows} 行")
         return (
             f"已刷新预览，当前显示前 {preview_rows} 行（数据总行数 {len(active)}）。",
@@ -817,11 +1089,20 @@ def _execute_table_command(
         )
 
     if action == "reset_view":
+        _push_undo_snapshot(session)
         session.view_df = session.df.copy()
+        _append_session_history(
+            session,
+            action="reset_view",
+            summary="重置到原始数据视图",
+            details={"rows": int(len(session.df))},
+        )
         trace.append("已重置为原始数据视图")
         return ("已重置筛选/排序，恢复到原始数据视图。", session, preview_rows)
 
     if action == "clear_data":
+        if session is not None:
+            _append_session_history(session, action="clear_data", summary="清空当前会话数据")
         SESSIONS.pop(session_id, None)
         trace.append("已清空会话中的数据")
         return ("已清空当前会话数据。可继续聊天，或发送“加载文件 路径”重新载入。", None, preview_rows)
@@ -873,6 +1154,7 @@ def _execute_table_command(
                 preview_rows,
             )
 
+        _push_undo_snapshot(session)
         clipped = numeric_series.clip(lower=lower, upper=upper)
         update_indices = source_df.index[numeric_mask]
         source_df.loc[update_indices, target_column] = clipped.loc[update_indices]
@@ -882,6 +1164,17 @@ def _execute_table_command(
                 session.view_df.loc[view_indices, target_column] = source_df.loc[view_indices, target_column]
 
         skipped_non_numeric = matched_count - updatable_count
+        _append_session_history(
+            session,
+            action="clip_group_range",
+            summary=f"按组裁剪列 {target_column} 到 [{lower:g}, {upper:g}]",
+            details={
+                "group_column": group_column,
+                "group_value": group_value,
+                "updated_rows": updatable_count,
+                "skipped_non_numeric": skipped_non_numeric,
+            },
+        )
         trace.append(
             f"范围裁剪完成：{group_column}=={group_value}, col={target_column}, range=[{lower}, {upper}], updated={updatable_count}, skipped_non_numeric={skipped_non_numeric}"
         )
@@ -925,9 +1218,16 @@ def _execute_table_command(
         if not source_indices:
             return ("单元格批量修改失败：没有可更新的行。", session, preview_rows)
 
+        _push_undo_snapshot(session)
         session.df.loc[source_indices, resolved] = new_value
         if session.view_df is not None:
             session.view_df.loc[source_indices, resolved] = new_value
+        _append_session_history(
+            session,
+            action="update_cell_range",
+            summary=f"批量更新第 {row_start}-{row_end} 行第 {column_number} 列",
+            details={"column": resolved, "count": len(source_indices), "value": new_value},
+        )
 
         trace.append(
             f"已批量更新单元格：rows={row_start}-{row_end}, col={column_number}({resolved}), new={new_value}, count={len(source_indices)}"
@@ -960,9 +1260,16 @@ def _execute_table_command(
             return (f"单元格修改失败：列 {resolved} 需要与原类型兼容的值。", session, preview_rows)
 
         old_value = session.df.at[source_index, resolved] if source_index in session.df.index else None
+        _push_undo_snapshot(session)
         session.df.at[source_index, resolved] = new_value
         if session.view_df is not None and source_index in session.view_df.index:
             session.view_df.at[source_index, resolved] = new_value
+        _append_session_history(
+            session,
+            action="update_cell",
+            summary=f"更新第 {row_number} 行第 {column_number} 列",
+            details={"column": resolved, "old": old_value, "new": new_value},
+        )
 
         trace.append(
             f"已更新单元格：row={row_number}, col={column_number}({resolved}), old={old_value}, new={new_value}"
@@ -983,7 +1290,14 @@ def _execute_table_command(
         if not resolved:
             return ("排序指令缺少列名。", session, preview_rows)
 
+        _push_undo_snapshot(session)
         session.view_df = active.sort_values(by=resolved, ascending=ascending, kind="stable")
+        _append_session_history(
+            session,
+            action="sort",
+            summary=f"按列 {resolved} {'升序' if ascending else '降序'} 排序",
+            details={"column": resolved, "ascending": ascending, "rows": int(len(session.view_df))},
+        )
         order_text = "升序" if ascending else "降序"
         trace.append(f"已按 {resolved} {order_text} 排序")
         return (f"已按列 {resolved} {order_text} 排序。", session, preview_rows)
@@ -1004,7 +1318,14 @@ def _execute_table_command(
         except Exception as exc:
             return (f"筛选失败：{exc}", session, preview_rows)
 
+        _push_undo_snapshot(session)
         session.view_df = filtered
+        _append_session_history(
+            session,
+            action="filter",
+            summary=f"筛选 {resolved} {op} {value}",
+            details={"column": resolved, "op": op, "value": value, "rows": int(len(filtered))},
+        )
         trace.append(f"筛选完成：{resolved} {op} {value}，剩余 {len(session.view_df)} 行")
         return (f"筛选完成：{resolved} {op} {value}，当前剩余 {len(session.view_df)} 行。", session, preview_rows)
 
@@ -1030,6 +1351,12 @@ async def upload_file(session_id: str, file: UploadFile = File(...)) -> dict[str
     df = _sanitize_dataframe(df)
 
     session = SessionData(df=df, filename=file.filename or "uploaded_file", view_df=df.copy(), last_plot_spec=None)
+    _append_session_history(
+        session,
+        action="upload_file",
+        summary=f"上传文件 {session.filename}",
+        details={"rows": int(len(df)), "columns": int(len(df.columns))},
+    )
     SESSIONS[session_id] = session
     state = _table_state(session)
 
@@ -1729,6 +2056,19 @@ def _safe_pdf_name(raw_name: str | None) -> str:
     return base
 
 
+def _safe_csv_name(raw_name: str | None) -> str:
+    base = (raw_name or "table").strip()
+    if not base:
+        base = "table"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+    base = base[:80].strip("._-")
+    if not base:
+        base = "table"
+    if not base.lower().endswith(".csv"):
+        base = f"{base}.csv"
+    return base
+
+
 def _general_chat_reply(message: str, *, has_dataset: bool) -> tuple[str, bool]:
     cfg = load_config()
 
@@ -1929,9 +2269,16 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
     template_spec = _guess_advanced_spec(request.message, columns)
     used_fallback = False
     used_rule_engine = False
+    used_cached_spec = False
     model_raw_text = ""
 
-    if template_spec:
+    cache_key = _normalize_plot_message_key(request.message)
+    cached = session.plot_message_cache.get(cache_key)
+    if cached:
+        spec_data = json.loads(json.dumps(cached))
+        used_cached_spec = True
+        trace.append("命中会话绘图缓存，复用上次同请求 PlotSpec")
+    elif template_spec:
         trace.append("检测到高级图模板指令，直接生成 composed PlotSpec")
         spec_data = _apply_request_overrides(request.message, template_spec, columns, trace)
         used_rule_engine = True
@@ -2000,16 +2347,40 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
                 used_fallback = True
                 used_rule_engine = True
 
-    if not used_rule_engine:
+    if not used_rule_engine and not used_cached_spec:
         spec_data = _apply_request_overrides(request.message, spec_data, columns, trace)
     spec = _validate_spec_or_400(spec_data, columns, trace)
     session.last_plot_spec = spec
+    spec_payload = _spec_to_dict(spec)
+    if cache_key:
+        session.plot_message_cache[cache_key] = spec_payload
+        session.plot_message_cache = _trim_plot_cache(session.plot_message_cache)
+    current_fingerprint = _spec_fingerprint(spec_payload)
+    unchanged = current_fingerprint == session.last_plot_fingerprint
+    session.last_plot_fingerprint = current_fingerprint
+
+    _append_session_history(
+        session,
+        action="plot_reuse" if used_cached_spec else "plot",
+        summary=f"生成图表 {spec.chart_type}" if not used_cached_spec else f"复用图表 {spec.chart_type}",
+        details={
+            "mode": mode,
+            "used_fallback": used_fallback,
+            "chart_type": spec.chart_type,
+            "cache_hit": used_cached_spec,
+            "unchanged": unchanged,
+        },
+    )
     trace.append(
         f"规范校验通过：chart={spec.chart_type}, x={spec.x}, y={spec.y}, hue={spec.hue}, palette={spec.palette}"
     )
 
-    if explicit_edit:
+    if used_cached_spec:
+        response_summary = f"已复用上次同请求图表（{spec.chart_type}，稳定输出）。"
+    elif explicit_edit:
         response_summary = f"已按指令更新当前图表参数（{spec.chart_type}）。"
+    elif unchanged:
+        response_summary = f"图表参数未变化，已按当前数据刷新 {spec.chart_type} 图。"
     elif used_fallback:
         response_summary = f"模型暂不可用，已通过规则引擎生成 {spec.chart_type} 图。"
     else:
@@ -2041,6 +2412,12 @@ def preview_spec(request: SpecRequest) -> dict[str, Any]:
     columns = [str(c) for c in active.columns]
     spec = _validate_spec_or_400(request.plot_spec, columns, trace)
     session.last_plot_spec = spec
+    _append_session_history(
+        session,
+        action="preview_spec",
+        summary=f"应用手动 PlotSpec（{spec.chart_type}）",
+        details={"chart_type": spec.chart_type},
+    )
     trace.append("PlotSpec 校验通过")
 
     return _build_chart_response(
@@ -2072,6 +2449,65 @@ def compute_stats(request: SpecRequest) -> dict[str, Any]:
         "stats": stats,
         "warnings": trace,
     }
+
+
+@app.get("/api/session/state")
+def get_session_state(session_id: str) -> dict[str, Any]:
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found")
+
+    return {
+        "session_id": session_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "history_count": int(len(session.history)),
+        "has_plot_spec": session.last_plot_spec is not None,
+        "undo_count": int(len(session.undo_stack)),
+        "redo_count": int(len(session.redo_stack)),
+        "snapshots": list(session.snapshots.keys()),
+        "table_state": _table_state(session),
+    }
+
+
+@app.get("/api/session/history")
+def get_session_history(session_id: str, limit: int = 50) -> dict[str, Any]:
+    if limit < 1 or limit > MAX_SESSION_HISTORY:
+        raise HTTPException(status_code=400, detail=f"limit must be in [1, {MAX_SESSION_HISTORY}]")
+
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found")
+
+    items = session.history[-limit:]
+    return {
+        "session_id": session_id,
+        "total": int(len(session.history)),
+        "items": items,
+    }
+
+
+@app.post("/api/export/csv")
+def export_csv(request: ExportCsvRequest):
+    session = SESSIONS.get(request.session_id)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found")
+
+    source_df = _active_df(session) if request.source == "active" else session.df
+    csv_text = source_df.to_csv(index=False)
+    csv_bytes = csv_text.encode("utf-8")
+    download_name = _safe_csv_name(request.filename or f"{Path(session.filename).stem}_{request.source}")
+    headers = {
+        "Content-Disposition": f'attachment; filename="{download_name}"',
+        "X-Export-Source": request.source,
+    }
+    _append_session_history(
+        session,
+        action="export_csv",
+        summary=f"导出 CSV（{request.source}）",
+        details={"rows": int(len(source_df)), "filename": download_name},
+    )
+    return Response(content=csv_bytes, media_type="text/csv", headers=headers)
 
 
 @app.post("/api/export/pdf")
@@ -2106,6 +2542,12 @@ def export_pdf(request: ExportPdfRequest):
         "X-Export-Used-Fallback": "true" if used_fallback else "false",
         "X-Export-Chart-Type": render_spec.chart_type,
     }
+    _append_session_history(
+        session,
+        action="export_pdf",
+        summary=f"导出 PDF（{render_spec.chart_type}）",
+        details={"used_fallback": used_fallback, "filename": download_name},
+    )
     return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 

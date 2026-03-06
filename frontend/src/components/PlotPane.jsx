@@ -101,7 +101,9 @@ export function PlotPane({
   warnings,
   thinking,
   canDownloadPdf,
+  canDownloadCsv,
   onDownloadPdf,
+  onDownloadCsv,
   onApplySpec,
   columnOptions,
   theme,
@@ -190,6 +192,15 @@ export function PlotPane({
             title={canDownloadPdf ? '导出当前图像为 PDF' : '暂无可导出内容'}
           >
             下载 PDF
+          </button>
+          <button
+            type="button"
+            className="ghost-btn"
+            disabled={!canDownloadCsv}
+            onClick={onDownloadCsv}
+            title={canDownloadCsv ? '导出当前表格视图为 CSV' : '暂无可导出表格'}
+          >
+            下载 CSV
           </button>
         </div>
       </div>

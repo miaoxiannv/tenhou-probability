@@ -9,12 +9,16 @@ from pydantic import ValidationError
 
 from backend.main import (
     ChatRequest,
+    ExportCsvRequest,
     ExportPdfRequest,
     SESSIONS,
     SpecRequest,
     chat_and_plot,
     compute_stats,
+    export_csv,
     export_pdf,
+    get_session_history,
+    get_session_state,
     preview_spec,
     static_fallback,
 )
@@ -503,6 +507,145 @@ class ChatAgentTests(unittest.TestCase):
         )
         self.assertEqual(response.media_type, "application/pdf")
         self.assertIn('filename="heatmap_chart.pdf"', response.headers.get("Content-Disposition", ""))
+
+    def test_session_state_and_history_endpoints(self):
+        csv_path = self._make_csv()
+        session_id = "session8825"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        chat_and_plot(ChatRequest(session_id=session_id, message="筛选 group == A", mode="table"))
+        chat_and_plot(ChatRequest(session_id=session_id, message="按 value 降序", mode="table"))
+
+        state = get_session_state(session_id=session_id)
+        self.assertEqual(state["session_id"], session_id)
+        self.assertIsNotNone(state["table_state"])
+        assert state["table_state"] is not None
+        self.assertEqual(state["table_state"]["row_count"], 2)
+        self.assertGreaterEqual(int(state["history_count"]), 3)
+
+        history = get_session_history(session_id=session_id, limit=20)
+        self.assertEqual(history["session_id"], session_id)
+        items = history["items"]
+        self.assertGreaterEqual(len(items), 3)
+        actions = [item.get("action") for item in items]
+        self.assertIn("load_file", actions)
+        self.assertIn("filter", actions)
+
+    def test_export_csv_endpoint_returns_active_view_and_original(self):
+        csv_path = self._make_csv()
+        session_id = "session8826"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        chat_and_plot(ChatRequest(session_id=session_id, message="筛选 group == A", mode="table"))
+
+        active_resp = export_csv(ExportCsvRequest(session_id=session_id, filename="active_view", source="active"))
+        self.assertEqual(active_resp.media_type, "text/csv")
+        self.assertIn('filename="active_view.csv"', active_resp.headers.get("Content-Disposition", ""))
+        active_text = active_resp.body.decode("utf-8")
+        self.assertIn("group,value", active_text)
+        self.assertEqual(len([ln for ln in active_text.splitlines() if ln.strip()]), 3)
+
+        original_resp = export_csv(ExportCsvRequest(session_id=session_id, filename="original_full", source="original"))
+        self.assertEqual(original_resp.media_type, "text/csv")
+        self.assertIn('filename="original_full.csv"', original_resp.headers.get("Content-Disposition", ""))
+        original_text = original_resp.body.decode("utf-8")
+        self.assertEqual(len([ln for ln in original_text.splitlines() if ln.strip()]), 5)
+
+    def test_chat_supports_undo_and_redo(self):
+        csv_path = self._make_csv()
+        session_id = "session8827"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        changed = chat_and_plot(ChatRequest(session_id=session_id, message="把第一行第二列的值改成8", mode="table"))
+        self.assertIsNotNone(changed["table_state"])
+        assert changed["table_state"] is not None
+        self.assertEqual(float(changed["table_state"]["preview_rows"][0]["value"]), 8.0)
+
+        undone = chat_and_plot(ChatRequest(session_id=session_id, message="撤销", mode="table"))
+        self.assertIsNotNone(undone["table_state"])
+        assert undone["table_state"] is not None
+        self.assertEqual(float(undone["table_state"]["preview_rows"][0]["value"]), 1.0)
+
+        redone = chat_and_plot(ChatRequest(session_id=session_id, message="重做", mode="table"))
+        self.assertIsNotNone(redone["table_state"])
+        assert redone["table_state"] is not None
+        self.assertEqual(float(redone["table_state"]["preview_rows"][0]["value"]), 8.0)
+
+    def test_chat_supports_snapshot_save_list_and_load(self):
+        csv_path = self._make_csv()
+        session_id = "session8828"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        saved = chat_and_plot(ChatRequest(session_id=session_id, message="保存快照 baseline", mode="table"))
+        self.assertIn("baseline", saved["summary"])
+
+        changed = chat_and_plot(ChatRequest(session_id=session_id, message="把第一行第二列的值改成9", mode="table"))
+        self.assertIsNotNone(changed["table_state"])
+        assert changed["table_state"] is not None
+        self.assertEqual(float(changed["table_state"]["preview_rows"][0]["value"]), 9.0)
+
+        loaded = chat_and_plot(ChatRequest(session_id=session_id, message="加载快照 baseline", mode="table"))
+        self.assertIsNotNone(loaded["table_state"])
+        assert loaded["table_state"] is not None
+        self.assertEqual(float(loaded["table_state"]["preview_rows"][0]["value"]), 1.0)
+
+        listed = chat_and_plot(ChatRequest(session_id=session_id, message="查看快照", mode="table"))
+        self.assertIn("baseline", listed["summary"])
+
+    def test_plot_repeated_message_reuses_cached_spec(self):
+        csv_path = self._make_csv()
+        session_id = "session8829"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        first = chat_and_plot(
+            ChatRequest(session_id=session_id, message="画图 type=scatter x=group y=value title=Demo", mode="plot")
+        )
+        second = chat_and_plot(
+            ChatRequest(session_id=session_id, message="画图 type=scatter x=group y=value title=Demo", mode="plot")
+        )
+
+        self.assertIsNotNone(first["plot_spec"])
+        self.assertIsNotNone(second["plot_spec"])
+        self.assertEqual(first["plot_spec"], second["plot_spec"])
+        self.assertIn("复用", second["summary"])
+
+        history = get_session_history(session_id=session_id, limit=20)
+        actions = [item.get("action") for item in history["items"]]
+        self.assertIn("plot_reuse", actions)
+
+    def test_session_state_reports_undo_redo_and_snapshots(self):
+        csv_path = self._make_csv()
+        session_id = "session8830"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        chat_and_plot(ChatRequest(session_id=session_id, message="保存快照 baseline", mode="table"))
+        chat_and_plot(ChatRequest(session_id=session_id, message="把第一行第二列的值改成6", mode="table"))
+        state = get_session_state(session_id=session_id)
+
+        self.assertIn("undo_count", state)
+        self.assertIn("redo_count", state)
+        self.assertIn("snapshots", state)
+        self.assertGreaterEqual(int(state["undo_count"]), 1)
+        self.assertEqual(int(state["redo_count"]), 0)
+        self.assertIn("baseline", state["snapshots"])
 
     def test_static_fallback_does_not_expose_backend_source(self):
         with self.assertRaises(HTTPException) as ctx:

@@ -149,6 +149,23 @@ body {
   gap: 8px;
 }
 
+.table-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.table-controls input,
+.table-controls select {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 0 10px;
+}
+
 .file-picker {
   flex: 1;
   position: relative;
@@ -197,7 +214,7 @@ body {
 
 .table-shell {
   position: relative;
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -262,6 +279,50 @@ body {
 
 .sheet-spreadsheet .Spreadsheet__data-viewer {
   padding: 7px 10px;
+}
+
+.history-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+
+.history-title {
+  font-size: 0.84rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 140px;
+  overflow: auto;
+}
+
+.history-item {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.history-action {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.history-summary {
+  margin-top: 2px;
+  font-size: 0.82rem;
+}
+
+.history-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .chat-shell {

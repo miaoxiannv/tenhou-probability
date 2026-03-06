@@ -21,13 +21,35 @@ When model planning is unavailable, the backend falls back to a rule engine, so 
   - preview/filter/sort/reset/clear
   - cell updates (`B1`, row/column, row ranges)
   - group-wise value clipping (e.g. clip `Expression` in `Control` to `5-7`)
+  - undo/redo (`撤销` / `重做`, `undo` / `redo`)
+  - snapshot checkpoints (`保存快照 baseline`, `加载快照 baseline`, `查看快照`)
 - Chart types:
   - `scatter`, `line`, `bar`, `hist`, `box`, `violin`, `heatmap`, `composed`
 - Advanced chart composition:
   - `layers` (`scatter/line/bar/hist/boxplot/violin/regression`)
   - `facet`
   - `stats_overlay`
+- Stable plot policy for repeated prompts:
+  - repeated same plot message in the same session reuses cached spec to avoid drift
 - PDF export (`POST /api/export/pdf`)
+- CSV export (`POST /api/export/csv`)
+- Session observability:
+  - current state (`GET /api/session/state`)
+  - action history (`GET /api/session/history`)
+
+## Productization Progress
+
+Current maturity estimate: **~72%**.
+
+- Already production-leaning:
+  - mode-routed chat/table/plot flows
+  - stable structured plot payloads
+  - session history and export paths (PDF/CSV)
+  - undo/redo + snapshots for table operations
+- Still needed for “production-grade”:
+  - persistent storage beyond in-memory sessions
+  - multi-user auth/permissions
+  - stronger E2E coverage and load testing
 
 ## Chat Modes
 
@@ -119,6 +141,13 @@ Frontend dev server: `http://127.0.0.1:5173`
 - Group clip:
   - `把Group中的Control组的所有Expression的范围更改为5-7`
   - `clip Expression where Group==Control to 5-7`
+- Undo/redo:
+  - `撤销`
+  - `redo`
+- Snapshots:
+  - `保存快照 baseline`
+  - `加载快照 baseline`
+  - `查看快照`
 - Plot:
   - `画图 type=line x=day y=il6 stats=on title=IL6 trend`
   - `plot type=scatter x=group y=value`
@@ -163,8 +192,17 @@ Validate/apply manual PlotSpec edits and regenerate preview payload.
 ### `POST /api/stats`
 Compute stats for given PlotSpec and current session data.
 
+### `GET /api/session/state`
+Returns session metadata, table state, `undo_count`, `redo_count`, and snapshot names.
+
+### `GET /api/session/history`
+Returns recent session action history (`action`, `summary`, `details`, timestamp).
+
 ### `POST /api/export/pdf`
 Export chart PDF bytes.
+
+### `POST /api/export/csv`
+Export current table view (`active`) or full source dataset (`original`) as CSV bytes.
 
 ## Environment Variables
 
