@@ -1,4 +1,4 @@
-# 数据可视化工作台（NL Viz Studio）
+# 表格绘图智能体工作台（SheetPilot Studio）
 
 一个三栏式自然语言数据可视化项目。
 

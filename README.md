@@ -1,4 +1,4 @@
-# NL Viz Studio
+# SheetPilot Studio
 
 Documentation is now split by language.
 

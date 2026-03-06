@@ -1,4 +1,4 @@
-# NL Viz Studio
+# SheetPilot Studio
 
 A three-pane natural-language data visualization workspace.
 

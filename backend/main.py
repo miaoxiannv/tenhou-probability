@@ -144,7 +144,7 @@ class ExportPdfRequest(BaseModel):
     filename: str | None = Field(default=None, max_length=120)
 
 
-app = FastAPI(title="NL Viz Studio", version="0.1.0")
+app = FastAPI(title="SheetPilot Studio", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

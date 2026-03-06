@@ -240,7 +240,7 @@ export function App() {
     <div className="app-root">
       <header className="app-header">
         <div>
-          <h1>数据可视化工作台</h1>
+          <h1>SheetPilot Studio</h1>
           <p>Spec-first：后端返回结构化 PlotSpec，前端直接渲染图并可继续编辑参数。</p>
         </div>
 
