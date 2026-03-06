@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 from fastapi import HTTPException
@@ -320,6 +321,41 @@ class ChatAgentTests(unittest.TestCase):
         self.assertIsNotNone(response["plot_spec"])
         assert response["plot_spec"] is not None
         self.assertEqual(response["plot_spec"]["chart_type"], "scatter")
+
+    def test_chat_plot_response_contains_execution_strategy(self):
+        csv_path = self._make_csv()
+        session_id = "session6240_meta"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(ChatRequest(session_id=session_id, message="画一个散点图", mode="plot"))
+        self.assertTrue(bool(response.get("execution_strategy")))
+        self.assertIn("fallback_reason", response)
+        self.assertEqual(response["execution_strategy"], "rule_fallback_no_api_key")
+        self.assertEqual(response["fallback_reason"], "missing_api_key")
+        self.assertTrue(bool(response["used_fallback"]))
+
+    def test_chat_model_invalid_spec_is_auto_repaired_by_rule_engine(self):
+        csv_path = self._make_csv()
+        session_id = "session6240_repair"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        os.environ["OPENAI_API_KEY"] = "test-key"
+        with patch("backend.main.call_responses_api", return_value='{"chart_type":"scatter","x":"not_exists","y":"value"}'):
+            response = chat_and_plot(ChatRequest(session_id=session_id, message="画一个散点图", mode="plot"))
+
+        self.assertTrue(bool(response["used_fallback"]))
+        self.assertEqual(response["execution_strategy"], "model_repair_rule")
+        self.assertEqual(response["fallback_reason"], "model_spec_invalid")
+        self.assertIsNotNone(response["plot_spec"])
+        assert response["plot_spec"] is not None
+        self.assertEqual(response["plot_spec"]["x"], "group")
+        self.assertEqual(response["plot_spec"]["y"], "value")
 
     def test_chat_without_dataset_still_replies(self):
         response = chat_and_plot(ChatRequest(session_id="session9012", message="你好"))
@@ -643,6 +679,7 @@ class ChatAgentTests(unittest.TestCase):
         self.assertIsNotNone(second["plot_spec"])
         self.assertEqual(first["plot_spec"], second["plot_spec"])
         self.assertIn("复用", second["summary"])
+        self.assertEqual(second["execution_strategy"], "cache_reuse")
 
         history = get_session_history(session_id=session_id, limit=20)
         actions = [item.get("action") for item in history["items"]]

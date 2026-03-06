@@ -2,8 +2,6 @@ import React, { useMemo, useState } from 'react';
 import Spreadsheet from 'react-spreadsheet';
 
 export function DataPane({
-  file,
-  onFileChange,
   uploadStatus,
   tableColumns,
   previewRows,
@@ -52,56 +50,15 @@ export function DataPane({
     <section className="panel data-pane panel-enter">
       <div className="panel-head">
         <h2>数据资产</h2>
-        <span className="panel-subtitle">字段、版本、审计</span>
+        <span className="panel-subtitle">字段预览与版本管理</span>
       </div>
 
-      <div className="upload-bar">
-        <label className="file-picker">
-          <input type="file" accept=".csv,.xlsx,.xls" onChange={onFileChange} />
-          <span>{file ? file.name : '上传数据文件'}</span>
-        </label>
-      </div>
-
-      <div className="table-controls version-toolbar">
+      <div className="table-controls quick-toolbar">
         <button type="button" className="ghost-btn" disabled={!canUndo || actionBusy} onClick={onUndo}>
           撤销
         </button>
         <button type="button" className="ghost-btn" disabled={!canRedo || actionBusy} onClick={onRedo}>
           重做
-        </button>
-        <input
-          value={snapshotDraft}
-          onChange={(event) => onSnapshotDraftChange?.(event.target.value)}
-          placeholder="版本名，如 baseline"
-          maxLength={40}
-        />
-        <button
-          type="button"
-          className="ghost-btn primary-btn"
-          disabled={!snapshotDraft?.trim() || actionBusy}
-          onClick={onSaveSnapshot}
-        >
-          保存版本
-        </button>
-        <select
-          value={selectedSnapshot}
-          onChange={(event) => onSelectedSnapshotChange?.(event.target.value)}
-          aria-label="版本列表"
-        >
-          <option value="">选择版本</option>
-          {(snapshotOptions || []).map((item) => (
-            <option key={item} value={item}>
-              {item}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="ghost-btn"
-          disabled={!selectedSnapshot || actionBusy}
-          onClick={onLoadSnapshot}
-        >
-          回滚到版本
         </button>
       </div>
 
@@ -148,18 +105,57 @@ export function DataPane({
           </div>
         ) : null}
         {activeTab === 'snapshots' ? (
-          hasSnapshots ? (
-            <div className="history-list">
-              {snapshotOptions.map((item) => (
-                <div key={`snap-${item}`} className="history-item">
-                  <div className="history-action">版本</div>
-                  <div className="history-summary">{item}</div>
-                </div>
-              ))}
+          <div className="snapshot-pane">
+            <div className="table-controls version-toolbar">
+              <input
+                value={snapshotDraft}
+                onChange={(event) => onSnapshotDraftChange?.(event.target.value)}
+                placeholder="版本名，如 baseline"
+                maxLength={40}
+              />
+              <button
+                type="button"
+                className="ghost-btn primary-btn"
+                disabled={!snapshotDraft?.trim() || actionBusy}
+                onClick={onSaveSnapshot}
+              >
+                保存版本
+              </button>
+              <select
+                value={selectedSnapshot}
+                onChange={(event) => onSelectedSnapshotChange?.(event.target.value)}
+                aria-label="版本列表"
+              >
+                <option value="">选择版本</option>
+                {(snapshotOptions || []).map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="ghost-btn"
+                disabled={!selectedSnapshot || actionBusy}
+                onClick={onLoadSnapshot}
+              >
+                回滚到版本
+              </button>
             </div>
-          ) : (
-            <div className="history-empty">暂无已保存版本。</div>
-          )
+
+            {hasSnapshots ? (
+              <div className="history-list">
+                {snapshotOptions.map((item) => (
+                  <div key={`snap-${item}`} className="history-item">
+                    <div className="history-action">版本</div>
+                    <div className="history-summary">{item}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="history-empty">暂无已保存版本。</div>
+            )}
+          </div>
         ) : null}
         {activeTab === 'audit' ? (
           hasHistory ? (

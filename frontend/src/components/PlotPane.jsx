@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PlotCanvas } from './PlotCanvas';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+
+const LazyPlotCanvas = React.lazy(() => import('./PlotCanvas').then((mod) => ({ default: mod.PlotCanvas })));
 
 function formatStats(stats) {
   if (!stats || typeof stats.p_value !== 'number') {
@@ -10,6 +11,45 @@ function formatStats(stats) {
   const effectMetric = stats.effect_metric || 'effect';
   const effectValue = typeof stats.effect_size === 'number' ? stats.effect_size.toFixed(3) : 'NA';
   return `${stats.method} · ${pText} · ${stars} · ${effectMetric}=${effectValue}`;
+}
+
+const STRATEGY_LABELS = {
+  model_primary: '模型规划',
+  model_repair_rule: '模型规划后规则修复',
+  cache_reuse: '缓存复用',
+  cache_repair_rule: '缓存修复',
+  template_rule: '模板规则',
+  rule_edit: '规则增量编辑',
+  rule_fallback_no_api_key: '规则降级（未配置模型）',
+  rule_fallback_model_error: '规则降级（模型调用失败）',
+  table_command: '表格指令执行',
+  table_guardrail: '表格模式拦截',
+  chat_only: '问答',
+  chat_intent: '问答意图',
+  chat_no_dataset: '无数据问答',
+  plot_no_dataset: '无数据绘图',
+};
+
+const FALLBACK_REASON_LABELS = {
+  missing_api_key: '未配置 API Key',
+  model_api_or_parse_error: '模型响应异常或不可解析',
+  model_spec_invalid: '模型规范无效',
+  cached_spec_invalid: '缓存规范失效',
+  chat_model_unavailable: '对话模型不可用',
+};
+
+function formatExecutionSummary(executionMeta) {
+  const strategy = executionMeta?.executionStrategy;
+  if (!strategy) {
+    return '';
+  }
+  const strategyText = STRATEGY_LABELS[strategy] || strategy;
+  if (!executionMeta?.usedFallback) {
+    return strategyText;
+  }
+  const reason = executionMeta?.fallbackReason;
+  const reasonText = reason ? FALLBACK_REASON_LABELS[reason] || reason : '';
+  return reasonText ? `${strategyText} · ${reasonText}` : strategyText;
 }
 
 function baseLayer(draft) {
@@ -100,6 +140,7 @@ export function PlotPane({
   stats,
   warnings,
   thinking,
+  executionMeta,
   canDownloadPdf,
   canDownloadCsv,
   canDownloadPng,
@@ -109,6 +150,7 @@ export function PlotPane({
   onApplySpec,
   onRetry,
   canRetry,
+  onOpenTune,
   onExportSpec,
   onImportSpec,
   columnOptions,
@@ -135,6 +177,7 @@ export function PlotPane({
 
   const submitDisabled = useMemo(() => editing || !draft.chart_type, [draft.chart_type, editing]);
   const warningSummary = Array.isArray(warnings) && warnings.length ? warnings[0] : '';
+  const executionSummary = useMemo(() => formatExecutionSummary(executionMeta), [executionMeta]);
 
   const updateLayer = (idx, updater) => {
     setDraft((prev) => {
@@ -222,8 +265,8 @@ export function PlotPane({
           <button type="button" className="ghost-btn" disabled={!canRetry} onClick={onRetry} title="使用上一次指令重试">
             重试
           </button>
-          <button type="button" className="ghost-btn" onClick={() => setAdvancedOpen(true)}>
-            高级设置
+          <button type="button" className="ghost-btn" onClick={onOpenTune} disabled={!plotSpec}>
+            微调
           </button>
           <details className="export-menu">
             <summary className="ghost-btn" aria-label="导出">
@@ -245,10 +288,17 @@ export function PlotPane({
       </div>
 
       <div className="plot-status">{plotStatus}</div>
+      {executionSummary ? (
+        <div className={`execution-chip ${executionMeta?.usedFallback ? 'degraded' : 'stable'}`}>
+          生成策略：{executionSummary}
+        </div>
+      ) : null}
 
       <div className="plot-canvas">
         {plotPayload ? (
-          <PlotCanvas payload={plotPayload} spec={plotSpec} theme={theme} />
+          <Suspense fallback={<div className="plot-loading">图表渲染中...</div>}>
+            <LazyPlotCanvas payload={plotPayload} spec={plotSpec} theme={theme} />
+          </Suspense>
         ) : (
           <div className="plot-placeholder">上传数据并描述图表需求，系统会先给出可用首图。</div>
         )}
@@ -259,6 +309,12 @@ export function PlotPane({
           <div className="metric-title">统计摘要</div>
           <div className="metric-note">{formatStats(stats)}</div>
         </div>
+      </div>
+
+      <div className="plot-secondary-actions">
+        <button type="button" className="link-btn" onClick={() => setAdvancedOpen(true)}>
+          打开高级参数
+        </button>
       </div>
 
       {warningSummary ? (

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createSession,
   exportCsvFile,
@@ -10,9 +10,10 @@ import {
   requestChat,
   uploadDataset,
 } from './api/client';
-import { DataPane } from './components/DataPane';
 import { ChatPane } from './components/ChatPane';
 import { PlotPane } from './components/PlotPane';
+
+const LazyDataPane = React.lazy(() => import('./components/DataPane').then((mod) => ({ default: mod.DataPane })));
 
 const SETTINGS_KEY = 'viz-workspace-settings-v1';
 const QUICK_PROMPTS = [
@@ -77,8 +78,14 @@ function triggerBlobDownload(blob, filename) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = filename;
+  anchor.rel = 'noopener';
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+    anchor.remove();
+  }, 0);
 }
 
 function SettingsIcon() {
@@ -106,6 +113,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showDataPanel, setShowDataPanel] = useState(false);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
+  const [toast, setToast] = useState(null);
   const [theme, setTheme] = useState(() => getInitialSettings().theme);
   const [fontSize, setFontSize] = useState(() => getInitialSettings().fontSize);
 
@@ -121,6 +129,11 @@ export function App() {
   const [stats, setStats] = useState(null);
   const [warnings, setWarnings] = useState([]);
   const [thinking, setThinking] = useState([]);
+  const [executionMeta, setExecutionMeta] = useState({
+    executionStrategy: '',
+    fallbackReason: null,
+    usedFallback: false,
+  });
 
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -129,9 +142,11 @@ export function App() {
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [exportingPng, setExportingPng] = useState(false);
+  const chatInputRef = useRef(null);
 
   const sendDisabled = useMemo(() => !prompt.trim(), [prompt]);
   const actionBusy = uploading || sending || tableActioning;
+  const debugModeEnabled = Boolean(import.meta.env?.DEV);
   const snapshotOptions = Array.isArray(sessionState?.snapshots) ? sessionState.snapshots : [];
   const canUndo = Boolean(hasTableData && Number(sessionState?.undo_count || 0) > 0 && !actionBusy);
   const canRedo = Boolean(hasTableData && Number(sessionState?.redo_count || 0) > 0 && !actionBusy);
@@ -140,6 +155,11 @@ export function App() {
   const canDownloadPng = Boolean(sessionId && plotSpec && !exportingPng);
   const canRetry = Boolean(lastUserPrompt && !sending);
   const datasetSummary = hasTableData ? uploadStatus : '未加载数据';
+  const chatPlaceholder = hasTableData
+    ? plotSpec
+      ? '描述微调需求，例如：把颜色改成蓝色，并增加统计标注'
+      : '描述你要的图，例如：按 Group 比较 Expression'
+    : '先上传数据，或输入：加载文件 /home/zhang/xxx.csv';
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -154,8 +174,22 @@ export function App() {
     );
   }, [fontSize, theme]);
 
+  useEffect(() => {
+    if (!toast) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setToast(null);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
   const appendMessage = (role, text) => {
     setMessages((prev) => [...prev, { role, text }]);
+  };
+
+  const pushToast = (kind, text) => {
+    setToast({ kind, text });
   };
 
   const refreshSessionMetadata = async (sid) => {
@@ -212,6 +246,11 @@ export function App() {
     setStats(data.stats || null);
     setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
     setThinking(Array.isArray(data.thinking) ? data.thinking : []);
+    setExecutionMeta({
+      executionStrategy: typeof data.execution_strategy === 'string' ? data.execution_strategy : '',
+      fallbackReason: typeof data.fallback_reason === 'string' ? data.fallback_reason : null,
+      usedFallback: Boolean(data.used_fallback),
+    });
     setPlotStatus(data.summary || '已完成');
   };
 
@@ -230,9 +269,11 @@ export function App() {
       applyTableState(data);
       await refreshSessionMetadata(sid);
       appendMessage('assistant', '数据已加载。请直接描述目标图，我会先生成首图。');
+      pushToast('success', '数据加载完成');
     } catch (error) {
       setUploadStatus(`上传失败：${error.message}`);
       appendMessage('error', `上传失败：${error.message}。建议：检查文件格式是否为 CSV/XLSX，并确认列名不为空。`);
+      pushToast('error', '上传失败，请检查文件格式');
     } finally {
       setUploading(false);
     }
@@ -275,6 +316,7 @@ export function App() {
     } catch (error) {
       setPlotStatus(`生成失败：${error.message}`);
       appendMessage('error', `生成失败：${error.message}。建议：补充图类型、x/y 字段，或先输入“预览 20 行”确认列名。`);
+      pushToast('error', '出图失败，请补充字段或图类型');
     } finally {
       setSending(false);
     }
@@ -318,6 +360,7 @@ export function App() {
   const handleDownloadPdf = async () => {
     if (!sessionId || !plotSpec) {
       appendMessage('error', '暂无可导出的图。建议先生成图后再导出。');
+      pushToast('error', '暂无可导出的图');
       return;
     }
 
@@ -326,8 +369,10 @@ export function App() {
       const filename = buildTimestamp('chart', 'pdf');
       const blob = await exportPdfFile(sessionId, plotSpec, filename);
       triggerBlobDownload(blob, filename);
+      pushToast('success', 'PDF 导出成功');
     } catch (error) {
       appendMessage('error', `PDF 导出失败：${error.message}。建议：先切换为基础图类型后重试。`);
+      pushToast('error', 'PDF 导出失败');
     } finally {
       setExportingPdf(false);
     }
@@ -336,6 +381,7 @@ export function App() {
   const handleDownloadPng = async () => {
     if (!sessionId || !plotSpec) {
       appendMessage('error', '暂无可导出的图。建议先生成图后再导出。');
+      pushToast('error', '暂无可导出的图');
       return;
     }
 
@@ -344,8 +390,10 @@ export function App() {
       const filename = buildTimestamp('chart', 'png');
       const blob = await exportPngFile(sessionId, plotSpec, filename);
       triggerBlobDownload(blob, filename);
+      pushToast('success', 'PNG 导出成功');
     } catch (error) {
       appendMessage('error', `PNG 导出失败：${error.message}。建议：先切换为基础图类型后重试。`);
+      pushToast('error', 'PNG 导出失败');
     } finally {
       setExportingPng(false);
     }
@@ -354,6 +402,7 @@ export function App() {
   const handleDownloadCsv = async () => {
     if (!sessionId || !hasTableData) {
       appendMessage('error', '暂无可导出表格。建议先上传或生成表格视图。');
+      pushToast('error', '暂无可导出表格');
       return;
     }
 
@@ -362,8 +411,10 @@ export function App() {
       const filename = buildTimestamp('table', 'csv');
       const blob = await exportCsvFile(sessionId, filename, 'active');
       triggerBlobDownload(blob, filename);
+      pushToast('success', 'CSV 导出成功');
     } catch (error) {
       appendMessage('error', `CSV 导出失败：${error.message}。建议：确认当前会话仍存在并重试。`);
+      pushToast('error', 'CSV 导出失败');
     } finally {
       setExportingCsv(false);
     }
@@ -372,22 +423,27 @@ export function App() {
   const handleExportSpec = () => {
     if (!plotSpec) {
       appendMessage('error', '暂无可导出的 spec。建议先生成图后导出。');
+      pushToast('error', '暂无可导出 spec');
       return;
     }
     const blob = new Blob([JSON.stringify(plotSpec, null, 2)], { type: 'application/json' });
     triggerBlobDownload(blob, buildTimestamp('spec', 'json'));
+    pushToast('success', 'spec.json 导出成功');
   };
 
   const handleImportSpec = async (specData) => {
     if (!specData || typeof specData !== 'object') {
       appendMessage('error', 'spec 导入失败：JSON 内容无效。');
+      pushToast('error', 'spec 导入失败，JSON 无效');
       return;
     }
     if (!sessionId) {
       appendMessage('error', 'spec 导入失败：请先上传数据并创建会话。');
+      pushToast('error', '请先上传数据再导入 spec');
       return;
     }
     await handleApplySpec(specData);
+    pushToast('success', 'spec 导入并应用成功');
   };
 
   const runTableCommand = async (command) => {
@@ -433,6 +489,18 @@ export function App() {
     await runTableCommand(`加载快照 ${name}`);
   };
 
+  const handleOpenTune = () => {
+    if (!plotSpec) {
+      appendMessage('error', '暂无可微调图，请先生成图。');
+      pushToast('error', '请先生成图再微调');
+      return;
+    }
+    setPrompt('请基于当前图微调：');
+    if (chatInputRef.current) {
+      chatInputRef.current.focus();
+    }
+  };
+
   return (
     <div className="app-root app-autoplot">
       <header className="app-header app-header-compact">
@@ -454,14 +522,16 @@ export function App() {
           >
             {showDataPanel ? '隐藏数据面板' : '数据面板'}
           </button>
-          <button
-            type="button"
-            className="ghost-btn"
-            onClick={() => setShowDebugInfo((prev) => !prev)}
-            aria-label="切换调试信息"
-          >
-            调试
-          </button>
+          {debugModeEnabled ? (
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => setShowDebugInfo((prev) => !prev)}
+              aria-label="切换调试信息"
+            >
+              调试
+            </button>
+          ) : null}
           <button
             type="button"
             className="settings-trigger"
@@ -475,10 +545,9 @@ export function App() {
 
       <div className="context-strip">
         <span className="context-chip">数据集：{datasetSummary}</span>
-        <span className="context-chip">模式：智能</span>
       </div>
 
-      {showDebugInfo ? (
+      {debugModeEnabled && showDebugInfo ? (
         <section className="debug-strip">
           <div>session: {sessionId || '未创建'}</div>
           <div>history: {Number(sessionState?.history_count || 0)}</div>
@@ -486,30 +555,42 @@ export function App() {
         </section>
       ) : null}
 
+      {toast ? (
+        <div className={`toast ${toast.kind === 'error' ? 'error' : 'success'}`} role="status" aria-live="polite">
+          {toast.text}
+        </div>
+      ) : null}
+
       <main className={`workspace ${showDataPanel ? 'workspace-with-data' : 'workspace-focus'}`}>
         {showDataPanel ? (
-          <DataPane
-            file={file}
-            onFileChange={handleSelectFile}
-            uploadStatus={uploadStatus}
-            tableColumns={tableColumns}
-            previewRows={previewRows}
-            loading={uploading}
-            actionBusy={actionBusy}
-            canUndo={canUndo}
-            canRedo={canRedo}
-            onUndo={handleUndo}
-            onRedo={handleRedo}
-            snapshotDraft={snapshotDraft}
-            onSnapshotDraftChange={setSnapshotDraft}
-            selectedSnapshot={selectedSnapshot}
-            onSelectedSnapshotChange={setSelectedSnapshot}
-            onSaveSnapshot={handleSaveSnapshot}
-            onLoadSnapshot={handleLoadSnapshot}
-            snapshotOptions={snapshotOptions}
-            historyItems={historyItems}
-            hasTableData={hasTableData}
-          />
+          <Suspense
+            fallback={
+              <section className="panel data-pane panel-enter">
+                <div className="panel-loading">数据面板加载中...</div>
+              </section>
+            }
+          >
+            <LazyDataPane
+              uploadStatus={uploadStatus}
+              tableColumns={tableColumns}
+              previewRows={previewRows}
+              loading={uploading}
+              actionBusy={actionBusy}
+              canUndo={canUndo}
+              canRedo={canRedo}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              snapshotDraft={snapshotDraft}
+              onSnapshotDraftChange={setSnapshotDraft}
+              selectedSnapshot={selectedSnapshot}
+              onSelectedSnapshotChange={setSelectedSnapshot}
+              onSaveSnapshot={handleSaveSnapshot}
+              onLoadSnapshot={handleLoadSnapshot}
+              snapshotOptions={snapshotOptions}
+              historyItems={historyItems}
+              hasTableData={hasTableData}
+            />
+          </Suspense>
         ) : null}
 
         <PlotPane
@@ -519,6 +600,7 @@ export function App() {
           stats={stats}
           warnings={warnings}
           thinking={thinking}
+          executionMeta={executionMeta}
           canDownloadPdf={canDownloadPdf}
           canDownloadCsv={canDownloadCsv}
           canDownloadPng={canDownloadPng}
@@ -528,6 +610,7 @@ export function App() {
           onApplySpec={handleApplySpec}
           onRetry={handleRetry}
           canRetry={canRetry}
+          onOpenTune={handleOpenTune}
           onExportSpec={handleExportSpec}
           onImportSpec={handleImportSpec}
           columnOptions={tableColumns}
@@ -544,10 +627,11 @@ export function App() {
           onSend={handleSend}
           sendDisabled={sendDisabled}
           sending={sending}
-          placeholder="输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性"
+          placeholder={chatPlaceholder}
           suggestions={QUICK_PROMPTS}
           onUseSuggestion={handleUseSuggestion}
           showModeSelector={false}
+          textareaRef={chatInputRef}
         />
       </main>
 

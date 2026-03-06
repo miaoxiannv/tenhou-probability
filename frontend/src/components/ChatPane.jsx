@@ -31,6 +31,7 @@ export function ChatPane({
   suggestions,
   onUseSuggestion,
   showModeSelector = true,
+  textareaRef,
 }) {
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -91,6 +92,7 @@ export function ChatPane({
 
         <form className="composer" onSubmit={handleSubmit}>
           <textarea
+            ref={textareaRef}
             value={prompt}
             onChange={(event) => onPromptChange(event.target.value)}
             placeholder={placeholder || '输入消息，Enter 发送，Shift+Enter 换行'}

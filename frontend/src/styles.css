@@ -188,6 +188,29 @@ button {
   background: color-mix(in srgb, var(--panel) 90%, var(--warn-soft) 10%);
 }
 
+.toast {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  z-index: 60;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 0.82rem;
+  box-shadow: var(--shadow-sm);
+  background: color-mix(in srgb, var(--panel) 88%, #ffffff 12%);
+}
+
+.toast.success {
+  border-color: #84d6a8;
+  background: color-mix(in srgb, var(--panel) 80%, var(--success-soft) 20%);
+}
+
+.toast.error {
+  border-color: #e4a9a9;
+  background: color-mix(in srgb, var(--panel) 80%, var(--danger-soft) 20%);
+}
+
 .settings-trigger {
   border: 1px solid var(--line-strong);
   background: linear-gradient(180deg, var(--panel), color-mix(in srgb, var(--panel) 80%, var(--accent-soft) 20%));
@@ -315,6 +338,15 @@ button {
   font-size: 1.03rem;
 }
 
+.panel-loading {
+  flex: 1;
+  min-height: 240px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .panel-subtitle {
   color: var(--muted);
   font-size: 0.83rem;
@@ -433,6 +465,15 @@ button {
   flex-wrap: wrap;
 }
 
+.quick-toolbar {
+  justify-content: flex-end;
+}
+
+.snapshot-pane {
+  display: grid;
+  gap: 8px;
+}
+
 .version-toolbar .primary-btn {
   border-color: var(--accent);
   background: linear-gradient(180deg, var(--accent), var(--accent-strong));
@@ -509,6 +550,28 @@ button {
   font-size: 0.85rem;
   min-height: 1.2em;
   line-height: 1.45;
+}
+
+.execution-chip {
+  align-self: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 90%, #ffffff 10%);
+}
+
+.execution-chip.stable {
+  border-color: #9ac8f7;
+  color: color-mix(in srgb, var(--text) 70%, var(--accent) 30%);
+  background: color-mix(in srgb, var(--panel) 78%, var(--accent-soft) 22%);
+}
+
+.execution-chip.degraded {
+  border-color: #f1c48d;
+  color: #8b4b00;
+  background: color-mix(in srgb, var(--panel) 78%, var(--warn-soft) 22%);
 }
 
 .composer button,
@@ -836,7 +899,8 @@ html[data-theme='dark'] .msg.error {
 }
 
 .plot-placeholder,
-.plot-note {
+.plot-note,
+.plot-loading {
   color: var(--muted);
 }
 
@@ -848,6 +912,13 @@ html[data-theme='dark'] .msg.error {
   font-size: 0.9rem;
 }
 
+.plot-loading {
+  min-height: 240px;
+  display: grid;
+  place-items: center;
+  font-size: 0.88rem;
+}
+
 .plot-note {
   margin: 0;
   font-size: 0.84rem;
@@ -855,6 +926,20 @@ html[data-theme='dark'] .msg.error {
 
 .plot-metrics {
   display: flex;
+}
+
+.plot-secondary-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.link-btn {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 4px;
 }
 
 .metric-box {

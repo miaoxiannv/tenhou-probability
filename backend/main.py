@@ -2002,6 +2002,8 @@ def _build_chart_response(
     used_fallback: bool,
     model_raw_text: str,
     include_legacy_render: bool,
+    execution_strategy: str | None = None,
+    fallback_reason: str | None = None,
 ) -> dict[str, Any]:
     df = _active_df(session)
     warnings: list[str] = []
@@ -2038,6 +2040,8 @@ def _build_chart_response(
         "session_id": session_id,
         "summary": summary,
         "used_fallback": used_fallback,
+        "execution_strategy": execution_strategy,
+        "fallback_reason": fallback_reason,
         "plot_spec": _spec_to_dict(spec),
         "stats": stats,
         "warnings": warnings,
@@ -2144,6 +2148,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "session_id": session_id,
             "summary": summary,
             "used_fallback": used_fallback,
+            "execution_strategy": "chat_only",
+            "fallback_reason": "chat_model_unavailable" if used_fallback else None,
             "plot_spec": plot_spec_payload,
             "stats": stats,
             "warnings": warnings,
@@ -2170,6 +2176,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "session_id": session_id,
             "summary": "当前为 table 模式，仅执行表格指令。可输入：筛选 group == A、按 value 降序、把第一行第二列的值改成2。",
             "used_fallback": False,
+            "execution_strategy": "table_guardrail",
+            "fallback_reason": None,
             "plot_spec": plot_spec_payload,
             "stats": stats,
             "warnings": warnings,
@@ -2201,6 +2209,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "session_id": session_id,
             "summary": summary,
             "used_fallback": False,
+            "execution_strategy": "table_command",
+            "fallback_reason": None,
             "plot_spec": plot_spec_payload,
             "stats": stats,
             "warnings": warnings,
@@ -2221,6 +2231,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
                 "session_id": session_id,
                 "summary": "当前为 plot 模式，但还没有可用数据。请先加载文件，例如：加载文件 /home/zhang/xxx.csv。",
                 "used_fallback": False,
+                "execution_strategy": "plot_no_dataset",
+                "fallback_reason": None,
                 "plot_spec": None,
                 "stats": None,
                 "warnings": [],
@@ -2238,6 +2250,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "session_id": session_id,
             "summary": summary,
             "used_fallback": used_fallback,
+            "execution_strategy": "chat_no_dataset",
+            "fallback_reason": "chat_model_unavailable" if used_fallback else None,
             "plot_spec": None,
             "stats": None,
             "warnings": [],
@@ -2265,6 +2279,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             "session_id": session_id,
             "summary": summary,
             "used_fallback": used_fallback,
+            "execution_strategy": "chat_intent",
+            "fallback_reason": "chat_model_unavailable" if used_fallback else None,
             "plot_spec": current_spec,
             "stats": current_stats,
             "warnings": current_warnings,
@@ -2290,17 +2306,21 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
     used_rule_engine = False
     used_cached_spec = False
     model_raw_text = ""
+    execution_strategy = "unknown"
+    fallback_reason: str | None = None
 
     cache_key = _normalize_plot_message_key(request.message)
     cached = session.plot_message_cache.get(cache_key)
     if cached:
         spec_data = json.loads(json.dumps(cached))
         used_cached_spec = True
+        execution_strategy = "cache_reuse"
         trace.append("命中会话绘图缓存，复用上次同请求 PlotSpec")
     elif template_spec:
         trace.append("检测到高级图模板指令，直接生成 composed PlotSpec")
         spec_data = _apply_request_overrides(request.message, template_spec, columns, trace)
         used_rule_engine = True
+        execution_strategy = "template_rule"
     elif explicit_edit:
         trace.append("识别为图表参数编辑指令，优先基于当前 PlotSpec 执行规则修改")
         spec_data = _build_rule_spec_data(
@@ -2310,6 +2330,7 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             trace=trace,
         )
         used_rule_engine = True
+        execution_strategy = "rule_edit"
     else:
         system_prompt = (
             "You are a data visualization planner. "
@@ -2344,6 +2365,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
             )
             used_fallback = True
             used_rule_engine = True
+            execution_strategy = "rule_fallback_no_api_key"
+            fallback_reason = "missing_api_key"
         else:
             try:
                 trace.append("调用模型生成绘图结构化规范")
@@ -2354,6 +2377,7 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
                     user_prompt=user_prompt,
                 )
                 spec_data = parse_json_from_model_output(model_raw_text)
+                execution_strategy = "model_primary"
                 trace.append("模型规范解析成功")
             except Exception as exc:
                 trace.append(f"模型不可用或输出不可解析，改用规则引擎：{exc.__class__.__name__}")
@@ -2365,10 +2389,34 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
                 )
                 used_fallback = True
                 used_rule_engine = True
+                execution_strategy = "rule_fallback_model_error"
+                fallback_reason = "model_api_or_parse_error"
 
     if not used_rule_engine and not used_cached_spec:
         spec_data = _apply_request_overrides(request.message, spec_data, columns, trace)
-    spec = _validate_spec_or_400(spec_data, columns, trace)
+    try:
+        spec = _validate_spec_or_400(spec_data, columns, trace)
+    except HTTPException:
+        should_attempt_rule_repair = not used_rule_engine or used_cached_spec
+        if not should_attempt_rule_repair:
+            raise
+        trace.append("现有 PlotSpec 校验失败，尝试规则引擎修复")
+        spec_data = _build_rule_spec_data(
+            message=request.message,
+            session=session,
+            columns=columns,
+            trace=trace,
+        )
+        spec_data = _apply_request_overrides(request.message, spec_data, columns, trace)
+        used_fallback = True
+        used_rule_engine = True
+        if used_cached_spec:
+            execution_strategy = "cache_repair_rule"
+            fallback_reason = "cached_spec_invalid"
+        else:
+            execution_strategy = "model_repair_rule"
+            fallback_reason = "model_spec_invalid"
+        spec = _validate_spec_or_400(spec_data, columns, trace)
     session.last_plot_spec = spec
     spec_payload = _spec_to_dict(spec)
     if cache_key:
@@ -2401,7 +2449,14 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
     elif unchanged:
         response_summary = f"图表参数未变化，已按当前数据刷新 {spec.chart_type} 图。"
     elif used_fallback:
-        response_summary = f"模型暂不可用，已通过规则引擎生成 {spec.chart_type} 图。"
+        if fallback_reason == "missing_api_key":
+            response_summary = f"未配置模型 API，已通过规则引擎生成 {spec.chart_type} 图。"
+        elif fallback_reason == "model_spec_invalid":
+            response_summary = f"模型返回了不可执行规范，已自动修复并生成 {spec.chart_type} 图。"
+        elif fallback_reason == "cached_spec_invalid":
+            response_summary = f"缓存图表规范已失效，已自动修复并生成 {spec.chart_type} 图。"
+        else:
+            response_summary = f"模型暂不可用，已通过规则引擎生成 {spec.chart_type} 图。"
     else:
         response_summary = f"已按请求生成 {spec.chart_type} 图。"
 
@@ -2414,6 +2469,8 @@ def chat_and_plot(request: ChatRequest) -> dict[str, Any]:
         used_fallback=used_fallback,
         model_raw_text=model_raw_text,
         include_legacy_render=cfg.model.enable_legacy_backend_render,
+        execution_strategy=execution_strategy,
+        fallback_reason=fallback_reason,
     )
     response["mode_used"] = mode
     response["intent"] = "plot"

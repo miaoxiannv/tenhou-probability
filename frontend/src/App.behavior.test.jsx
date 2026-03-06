@@ -34,6 +34,8 @@ function baseChatResponse(overrides = {}) {
     session_id: 'session-1',
     summary: '已回复。',
     used_fallback: false,
+    execution_strategy: '',
+    fallback_reason: null,
     plot_spec: null,
     stats: null,
     warnings: [],
@@ -86,7 +88,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, '你好');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -113,8 +115,25 @@ describe('App behavior', () => {
     render(<App />);
 
     await user.click(screen.getByRole('button', { name: '切换数据面板' }));
-    expect(screen.getByRole('columnheader', { name: 'A' })).toBeInTheDocument();
-    expect(screen.getByRole('columnheader', { name: 'H' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('columnheader', { name: 'A' })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: 'H' })).toBeInTheDocument();
+    });
+  });
+
+  it('keeps version controls inside snapshots tab by default', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: '切换数据面板' }));
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: '字段' })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: '保存版本' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: '版本' }));
+    expect(screen.getByRole('button', { name: '保存版本' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '回滚到版本' })).toBeInTheDocument();
   });
 
   it('shows loading and prevents duplicate submit while sending', async () => {
@@ -127,7 +146,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, 'test message');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -161,7 +180,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, '画图');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -181,6 +200,72 @@ describe('App behavior', () => {
         expect.stringMatching(/^chart_\d{8}_\d{4}\.pdf$/),
       );
     });
+  });
+
+  it('shows execution strategy and fallback hint from backend response', async () => {
+    api.requestChat.mockResolvedValue(
+      baseChatResponse({
+        summary: '未配置模型 API，已通过规则引擎生成 scatter 图。',
+        used_fallback: true,
+        execution_strategy: 'rule_fallback_no_api_key',
+        fallback_reason: 'missing_api_key',
+        plot_spec: { chart_type: 'scatter', x: 'x', y: 'y', hue: null, filters: [] },
+        plot_payload: {
+          chart_type: 'scatter',
+          x: 'x',
+          y: 'y',
+          hue: null,
+          records: [{ x: 1, y: 2 }],
+          rows: 1,
+          total_rows: 1,
+          truncated: false,
+        },
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByRole('textbox'), '画图');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/生成策略：/)).toBeInTheDocument();
+      expect(screen.getByText(/未配置 API Key/)).toBeInTheDocument();
+    });
+  });
+
+  it('can prefill tuning prompt from tune action', async () => {
+    api.requestChat.mockResolvedValue(
+      baseChatResponse({
+        plot_spec: { chart_type: 'scatter', x: 'x', y: 'y', hue: null, filters: [] },
+        plot_payload: {
+          chart_type: 'scatter',
+          x: 'x',
+          y: 'y',
+          hue: null,
+          records: [{ x: 1, y: 2 }],
+          rows: 1,
+          total_rows: 1,
+          truncated: false,
+        },
+        summary: '图已更新',
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const textbox = screen.getByRole('textbox');
+    await user.type(textbox, '画图');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '微调' })).toBeEnabled();
+    });
+
+    await user.click(screen.getByRole('button', { name: '微调' }));
+    expect(screen.getByRole('textbox')).toHaveValue('请基于当前图微调：');
   });
 
   it('downloads csv from unified export menu when table data exists', async () => {
@@ -204,7 +289,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, '筛选 group == A');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -287,7 +372,7 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, '把第一行第二列的值改成8');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -296,6 +381,9 @@ describe('App behavior', () => {
     });
 
     await user.click(screen.getByRole('button', { name: '切换数据面板' }));
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: '字段' })).toBeInTheDocument();
+    });
     const undoBtn = screen.getByRole('button', { name: '撤销' });
     await waitFor(() => expect(undoBtn).toBeEnabled());
     await user.click(undoBtn);
@@ -345,11 +433,14 @@ describe('App behavior', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const textbox = screen.getByPlaceholderText('输入你的图表需求，例如：按 Group 对比 Expression，并标注显著性');
+    const textbox = screen.getByRole('textbox');
     await user.type(textbox, '把第一行第二列的值改成8');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
     await user.click(screen.getByRole('button', { name: '切换数据面板' }));
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: '字段' })).toBeInTheDocument();
+    });
     await user.click(screen.getByRole('tab', { name: '审计' }));
 
     await waitFor(() => {
