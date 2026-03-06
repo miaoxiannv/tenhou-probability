@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+/tmp/
+*.log
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+.pytest_cache/
+.coverage
+coverage/

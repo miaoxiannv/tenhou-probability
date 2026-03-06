@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bio Plot Copilot</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Bio Plot Copilot</h1>
+      <p>左侧上传Excel，中间自然语言描述图，右侧生成科研风格图表（Python seaborn/scienceplots）。</p>
+    </header>
+
+    <main class="workspace">
+      <section class="pane left-pane">
+        <h2>数据表</h2>
+        <div class="upload-row">
+          <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+          <button id="uploadBtn">上传</button>
+        </div>
+        <div id="uploadStatus" class="muted">未上传文件</div>
+
+        <h3>字段信息</h3>
+        <div id="columnsMeta" class="meta-list"></div>
+
+        <h3>预览数据（前50行）</h3>
+        <div class="table-wrap">
+          <table id="previewTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="pane middle-pane">
+        <h2>Chat</h2>
+        <div id="chatLog" class="chat-log"></div>
+        <div class="chat-input-row">
+          <textarea
+            id="promptInput"
+            rows="4"
+            placeholder="例：按 group 绘制 IL6 箱线图，按 condition 分色，去掉 IL6<=0 的样本"
+          ></textarea>
+          <button id="sendBtn" disabled>生成图像</button>
+        </div>
+      </section>
+
+      <section class="pane right-pane">
+        <h2>可视化</h2>
+        <div id="plotStatus" class="muted">等待指令</div>
+        <div class="plot-wrap">
+          <img id="plotImage" alt="plot" />
+        </div>
+
+        <h3>图表Spec</h3>
+        <pre id="specOutput" class="code-block"></pre>
+
+        <h3>Python代码片段</h3>
+        <pre id="codeOutput" class="code-block"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
