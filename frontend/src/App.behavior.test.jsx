@@ -154,6 +154,9 @@ describe('App behavior', () => {
         expect.objectContaining({ chart_type: 'scatter' }),
         expect.stringMatching(/^chart_\d{8}_\d{4}\.pdf$/),
       );
+      expect(global.URL.createObjectURL).toHaveBeenCalledTimes(1);
+      expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1);
+      expect(global.URL.revokeObjectURL).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -2084,15 +2084,28 @@ def export_pdf(request: ExportPdfRequest):
     columns = [str(c) for c in active.columns]
     trace: list[str] = []
     spec = _validate_spec_or_400(request.plot_spec, columns, trace)
+    render_spec = spec
+    used_fallback = False
 
     try:
-        _, pdf_b64, _ = render_plot(active, spec)
+        _, pdf_b64, _ = render_plot(active, render_spec)
         pdf_bytes = base64.b64decode(pdf_b64.encode("ascii"))
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PDF export failed: {exc}") from exc
+        trace.append(f"PDF 主渲染失败，准备降级：{exc}")
+        try:
+            render_spec = _fallback_renderable_spec(spec, columns, trace)
+            _, pdf_b64, _ = render_plot(active, render_spec)
+            pdf_bytes = base64.b64decode(pdf_b64.encode("ascii"))
+            used_fallback = True
+        except Exception as degrade_exc:
+            raise HTTPException(status_code=400, detail=f"PDF export failed: {degrade_exc}") from degrade_exc
 
     download_name = _safe_pdf_name(request.filename)
-    headers = {"Content-Disposition": f'attachment; filename="{download_name}"'}
+    headers = {
+        "Content-Disposition": f'attachment; filename="{download_name}"',
+        "X-Export-Used-Fallback": "true" if used_fallback else "false",
+        "X-Export-Chart-Type": render_spec.chart_type,
+    }
     return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 

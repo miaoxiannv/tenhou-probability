@@ -335,6 +335,10 @@ def _parse_layers(
                 )
             )
     else:
+        if chart_type == "heatmap":
+            # Heatmap is rendered by backend correlation logic and does not require layers.
+            return []
+
         if chart_type == "composed":
             raise ValueError("composed chart requires non-empty layers")
 

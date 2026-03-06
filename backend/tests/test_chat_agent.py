@@ -425,6 +425,20 @@ class ChatAgentTests(unittest.TestCase):
         assert scatter_layer is not None
         self.assertTrue(bool(scatter_layer.get("jitter")))
 
+    def test_chat_can_generate_heatmap(self):
+        csv_path = self._make_csv()
+        session_id = "session9923"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = chat_and_plot(ChatRequest(session_id=session_id, message="画热图", mode="plot"))
+        self.assertIsNotNone(response["plot_spec"])
+        assert response["plot_spec"] is not None
+        self.assertIn(response["plot_spec"]["chart_type"], {"heatmap", "scatter"})
+        self.assertIsNotNone(response["plot_payload"])
+
     def test_export_pdf_endpoint_returns_pdf_bytes(self):
         csv_path = self._make_csv()
         session_id = "session8822"
@@ -442,6 +456,53 @@ class ChatAgentTests(unittest.TestCase):
         )
         self.assertEqual(response.media_type, "application/pdf")
         self.assertIn('filename="chart_test.pdf"', response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.headers.get("X-Export-Used-Fallback"), "false")
+
+    def test_export_pdf_endpoint_supports_composed_spec_with_fallback(self):
+        csv_path = self._make_csv()
+        session_id = "session8823"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = export_pdf(
+            ExportPdfRequest(
+                session_id=session_id,
+                plot_spec={
+                    "chart_type": "composed",
+                    "x": "group",
+                    "y": "value",
+                    "hue": "group",
+                    "layers": [
+                        {"mark": "scatter", "encoding": {"x": "group", "y": "value", "hue": "group"}},
+                        {"mark": "boxplot", "encoding": {"x": "group", "y": "value"}},
+                    ],
+                },
+                filename="composed_chart",
+            )
+        )
+        self.assertEqual(response.media_type, "application/pdf")
+        self.assertIn('filename="composed_chart.pdf"', response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.headers.get("X-Export-Used-Fallback"), "true")
+
+    def test_export_pdf_endpoint_supports_heatmap_spec(self):
+        csv_path = self._make_csv()
+        session_id = "session8824"
+        try:
+            chat_and_plot(ChatRequest(session_id=session_id, message=f"加载文件 {csv_path}"))
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+        response = export_pdf(
+            ExportPdfRequest(
+                session_id=session_id,
+                plot_spec={"chart_type": "heatmap"},
+                filename="heatmap_chart",
+            )
+        )
+        self.assertEqual(response.media_type, "application/pdf")
+        self.assertIn('filename="heatmap_chart.pdf"', response.headers.get("Content-Disposition", ""))
 
     def test_static_fallback_does_not_expose_backend_source(self):
         with self.assertRaises(HTTPException) as ctx:
